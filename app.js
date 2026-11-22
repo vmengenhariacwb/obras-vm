@@ -11,6 +11,10 @@ const EMPRESA = {
 };
 const CLIMAS = ['', 'Ensolarado', 'Parcialmente nublado', 'Nublado', 'Garoa', 'Chuvoso'];
 const CONDICOES = ['', 'Praticável', 'Parcialmente praticável', 'Impraticável'];
+// Financeiro: mesmas listas da planilha "CONTAS A PAGAR E RECEBER OBRAS" + Equipamentos/locação
+const CLASSIFICACOES = ['Mão de obra', 'Material', 'Fornecedor', 'Equipamentos/locação', 'Prestação de serviços', 'Impostos', 'Contas', 'Reembolsos'];
+const FORMAS = ['', 'Pix', 'Dinheiro', 'Boleto', 'Transferência', 'Cartão de crédito', 'Cartão de débito', 'Cheque'];
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
 
 // ---------------------------------------------------------------- banco
@@ -18,14 +22,22 @@ let _db;
 function abrirBanco() {
   if (_db) return Promise.resolve(_db);
   return new Promise((ok, erro) => {
-    const r = indexedDB.open('obras-vm', 1);
-    r.onupgradeneeded = () => {
+    const r = indexedDB.open('obras-vm', 2);
+    r.onupgradeneeded = (ev) => {
       const db = r.result;
-      db.createObjectStore('obras', { keyPath: 'id' });
-      db.createObjectStore('visitas', { keyPath: 'id' }).createIndex('obraId', 'obraId');
-      const f = db.createObjectStore('fotos', { keyPath: 'id' });
-      f.createIndex('visitaId', 'visitaId');
-      f.createIndex('obraId', 'obraId');
+      if (ev.oldVersion < 1) {
+        db.createObjectStore('obras', { keyPath: 'id' });
+        db.createObjectStore('visitas', { keyPath: 'id' }).createIndex('obraId', 'obraId');
+        const f = db.createObjectStore('fotos', { keyPath: 'id' });
+        f.createIndex('visitaId', 'visitaId');
+        f.createIndex('obraId', 'obraId');
+      }
+      if (ev.oldVersion < 2) {
+        // Versão 2: financeiro (lançamentos), comprovantes (fotos com lancamentoId) e registro de exclusões
+        db.createObjectStore('lancamentos', { keyPath: 'id' }).createIndex('obraId', 'obraId');
+        r.transaction.objectStore('fotos').createIndex('lancamentoId', 'lancamentoId');
+        db.createObjectStore('excluidos', { keyPath: 'id' });
+      }
     };
     r.onsuccess = () => { _db = r.result; ok(_db); };
     r.onerror = () => erro(r.error);
@@ -46,6 +58,8 @@ const gravar = (l, o) => tx(l, 'readwrite', (s) => s.put(o));
 const apagar = (l, id) => tx(l, 'readwrite', (s) => s.delete(id));
 const todos = (l) => tx(l, 'readonly', (s) => s.getAll());
 const porIndice = (l, i, v) => tx(l, 'readonly', (s) => s.index(i).getAll(v));
+// Exclusão feita pelo usuário: apaga e anota, para a sincronização saber que foi excluído.
+async function excluir(l, id) { await apagar(l, id); await gravar('excluidos', { id, loja: l, em: agora() }); }
 
 // ---------------------------------------------------------------- utilidades
 const $ = (sel, raiz = document) => raiz.querySelector(sel);
@@ -53,10 +67,38 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const novoId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const agora = () => new Date().toISOString();
 function hoje() { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+function maisDias(n) { const d = new Date(Date.now() + n * 864e5); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 function dataBR(iso) { if (!iso) return ''; const [a, m, d] = iso.split('-'); return `${d}/${m}/${a}`; }
 function dataExtenso(iso) { const [a, m, d] = iso.split('-').map(Number); return `${d} de ${MESES[m - 1]} de ${a}`; }
 const porData = (a, b) => (a.data || '').localeCompare(b.data || '') || (a.criadoEm || '').localeCompare(b.criadoEm || '');
 function slug(s) { return String(s || 'obra').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'obra'; }
+const moeda = (n) => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+// Entende "1.500,00", "1500", "1500,5" e "1.500" (milhar) como reais.
+function lerValor(s) {
+  s = String(s ?? '').replace(/[^\d,.-]/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+const valorCampo = (n) => (n ? Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '');
+// Mesmos status da planilha: Pago, Em dia, Atrasado
+const statusDe = (l) => (l.pago ? 'Pago' : (l.vencimento && l.vencimento < hoje() ? 'Atrasado' : 'Em dia'));
+function somarMeses(iso, n) {
+  const [a, m, d] = iso.split('-').map(Number);
+  const ult = new Date(a, m - 1 + n + 1, 0).getDate();            // último dia do mês de destino
+  const dt = new Date(a, m - 1 + n, Math.min(d, ult));
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+const _scripts = {};
+function carregarScript(url) {
+  if (!_scripts[url]) _scripts[url] = new Promise((ok, erro) => {
+    const s = document.createElement('script'); s.src = url; s.onload = ok;
+    s.onerror = () => { delete _scripts[url]; erro(new Error('sem internet para carregar o gerador de planilha. Tente de novo com sinal.')); };
+    document.head.appendChild(s);
+  });
+  return _scripts[url];
+}
 function opcoes(lista, atual) { return lista.map((o) => `<option value="${esc(o)}"${o === atual ? ' selected' : ''}>${o ? esc(o) : '—'}</option>`).join(''); }
 
 let _avisoTimer;
@@ -116,11 +158,13 @@ function limparUrls() { _urls.forEach((u) => URL.revokeObjectURL(u)); _urls = []
 async function rota() {
   if (_salvarPendente) await _salvarPendente();
   limparUrls();
-  const [tela, id] = location.hash.replace(/^#\/?/, '').split('/');
+  const [tela, id, extra] = location.hash.replace(/^#\/?/, '').split('/');
   const main = $('#tela');
   try {
-    if (tela === 'obra') await telaObra(main, id);
+    if (tela === 'obra') await telaObra(main, id, extra === 'financeiro' ? 'financeiro' : 'diario');
     else if (tela === 'visita') await telaVisita(main, id);
+    else if (tela === 'lancamento') await telaLancamento(main, id);
+    else if (tela === 'novo-lancamento') await telaLancamento(main, null, id, extra);
     else await telaInicio(main);
   } catch (e) {
     console.error(e);
@@ -133,6 +177,14 @@ async function telaInicio(main) {
   const obras = (await todos('obras')).sort((a, b) => (b.atualizadoEm || '').localeCompare(a.atualizadoEm || ''));
   const visitas = await todos('visitas');
   const qtd = (id) => visitas.filter((v) => v.obraId === id).length;
+  const lancs = await todos('lancamentos');
+  const emAberto = lancs.filter((l) => !l.pago && l.vencimento);
+  const daqui7 = maisDias(7);
+  const atrasados = emAberto.filter((l) => l.vencimento < hoje());
+  const proximos = emAberto.filter((l) => l.vencimento >= hoje() && l.vencimento <= daqui7);
+  const nomeObra = (id) => (obras.find((o) => o.id === id) || {}).nome || '';
+  const linhaAlerta = (l) => `<li><a class="item" href="#/lancamento/${l.id}"><strong>${esc(l.descricao)} · ${moeda(l.valor)}</strong>
+      <small>${l.tipo === 'Receber' ? 'A receber' : 'A pagar'} · ${esc(nomeObra(l.obraId))} · venc. ${dataBR(l.vencimento)}</small></a></li>`;
   let uso = '';
   try { const e = await navigator.storage.estimate(); uso = `Espaço usado no aparelho: ${(e.usage / 1048576).toFixed(1)} MB.`; } catch (e) { /* sem suporte */ }
 
@@ -146,6 +198,15 @@ async function telaInicio(main) {
       </a></li>`).join('')}</ul>`
       : '<p class="vazio">Nenhuma obra ainda. Toque em <b>+ Nova obra</b> para começar.</p>'}
 
+    ${atrasados.length ? `<h2 class="alerta">Atrasados (${atrasados.length})</h2><ul class="lista">${atrasados.sort((a, b) => a.vencimento.localeCompare(b.vencimento)).map(linhaAlerta).join('')}</ul>` : ''}
+    ${proximos.length ? `<h2>Vencem em até 7 dias (${proximos.length})</h2><ul class="lista">${proximos.sort((a, b) => a.vencimento.localeCompare(b.vencimento)).map(linhaAlerta).join('')}</ul>` : ''}
+
+    <h2>Financeiro</h2>
+    <div class="card">
+      <p class="sub" style="margin:0">Planilha Excel com os lançamentos de todas as obras, nas mesmas colunas da aba LANÇAMENTOS.</p>
+      <div class="botoes"><button class="btn sec" id="b-excel" type="button">Exportar planilha (todas as obras)</button></div>
+    </div>
+
     <h2>Cópia de segurança</h2>
     <div class="card">
       <p class="sub" style="margin:0">Os dados ficam só neste aparelho. Faça um backup no fim de cada visita e salve o arquivo no Nextcloud.</p>
@@ -157,13 +218,14 @@ async function telaInicio(main) {
     <p class="rodape-info">${esc(uso)}<br>${EMPRESA.nome} · ${EMPRESA.resp} · ${EMPRESA.crea}</p>
     <a class="btn flutuante" href="#/obra/nova">+ Nova obra</a>`;
 
+  $('#b-excel').onclick = (e) => exportarExcel(null, e.currentTarget);
   $('#b-backup').onclick = fazerBackup;
   $('#b-restaurar').onchange = (e) => { const f = e.target.files[0]; if (f) restaurarBackup(f); e.target.value = ''; };
 }
 
-async function telaObra(main, id) {
+async function telaObra(main, id, aba) {
   const nova = id === 'nova';
-  const obra = nova ? { id: novoId(), nome: '', cliente: '', local: '', art: '', inicio: '' } : await pegar('obras', id);
+  const obra = nova ? { id: novoId(), nome: '', cliente: '', local: '', art: '', inicio: '', valorContrato: 0, custoPrevisto: 0 } : await pegar('obras', id);
   if (!obra) { location.hash = '#/'; return; }
   const visitas = nova ? [] : (await porIndice('visitas', 'obraId', obra.id)).sort(porData);
   const fotos = nova ? [] : await porIndice('fotos', 'obraId', obra.id);
@@ -186,10 +248,46 @@ async function telaObra(main, id) {
           <div><label for="o-art">Nº da ART</label><input id="o-art" name="art" inputmode="numeric" value="${esc(obra.art)}"></div>
           <div><label for="o-inicio">Início</label><input id="o-inicio" name="inicio" type="date" value="${esc(obra.inicio)}"></div>
         </div>
+        <div class="duas">
+          <div><label for="o-contrato">Valor do contrato (R$)</label><input id="o-contrato" name="valorContrato" inputmode="decimal" value="${valorCampo(obra.valorContrato)}" placeholder="0,00"></div>
+          <div><label for="o-previsto">Custo previsto (R$)</label><input id="o-previsto" name="custoPrevisto" inputmode="decimal" value="${valorCampo(obra.custoPrevisto)}" placeholder="0,00"></div>
+        </div>
         <div class="botoes"><button class="btn" type="submit">${nova ? 'Criar obra' : 'Salvar dados'}</button></div>
       </form>
     </details>
     ${nova ? '' : `
+      <nav class="abas">
+        <a href="#/obra/${obra.id}" ${aba === 'diario' ? 'aria-current="page"' : ''}>Diário</a>
+        <a href="#/obra/${obra.id}/financeiro" ${aba === 'financeiro' ? 'aria-current="page"' : ''}>Financeiro</a>
+      </nav>
+      <div id="conteudo-aba"></div>`}`;
+
+  $('#f-obra').onsubmit = async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(e.target));
+    d.valorContrato = lerValor(d.valorContrato); d.custoPrevisto = lerValor(d.custoPrevisto);
+    Object.assign(obra, d, { atualizadoEm: agora() });
+    if (!obra.criadoEm) obra.criadoEm = agora();
+    await gravar('obras', obra);
+    pedirArmazenamentoFixo();
+    if (nova) location.hash = '#/obra/' + obra.id; else { aviso('Dados da obra salvos'); rota(); }
+  };
+  if (nova) return;
+
+  const excluirObra = async () => {
+    const lancs = await porIndice('lancamentos', 'obraId', obra.id);
+    const todasFotos = await porIndice('fotos', 'obraId', obra.id);
+    if (!confirm(`Excluir a obra "${obra.nome}" com ${visitas.length} visita(s), ${todasFotos.length} foto(s) e ${lancs.length} lançamento(s)? Isso não tem volta (a não ser por um backup).`)) return;
+    for (const f of todasFotos) await excluir('fotos', f.id);
+    for (const l of lancs) await excluir('lancamentos', l.id);
+    for (const v of visitas) await excluir('visitas', v.id);
+    await excluir('obras', obra.id);
+    aviso('Obra excluída'); location.hash = '#/';
+  };
+
+  if (aba === 'financeiro') { await abaFinanceiro($('#conteudo-aba'), obra, excluirObra); return; }
+
+  $('#conteudo-aba').innerHTML = `
       <h2>Diário de obra</h2>
       ${visitas.length ? `<ul class="lista">${visitas.slice().reverse().map((v) => {
         const n = fotos.filter((f) => f.visitaId === v.id).length;
@@ -199,18 +297,7 @@ async function telaObra(main, id) {
           <small>${n} foto(s)${resumo ? ' · ' + esc(resumo) : ''}</small></a></li>`;
       }).join('')}</ul>` : '<p class="vazio">Nenhuma visita registrada.</p>'}
       <div class="botoes"><button class="btn perigo" id="b-excluir-obra" type="button">Excluir obra</button></div>
-      <button class="btn flutuante" id="b-nova-visita" type="button">+ Nova visita (hoje)</button>`}`;
-
-  $('#f-obra').onsubmit = async (e) => {
-    e.preventDefault();
-    const d = Object.fromEntries(new FormData(e.target));
-    Object.assign(obra, d, { atualizadoEm: agora() });
-    if (!obra.criadoEm) obra.criadoEm = agora();
-    await gravar('obras', obra);
-    pedirArmazenamentoFixo();
-    if (nova) location.hash = '#/obra/' + obra.id; else { aviso('Dados da obra salvos'); rota(); }
-  };
-  if (nova) return;
+      <button class="btn flutuante" id="b-nova-visita" type="button">+ Nova visita (hoje)</button>`;
 
   $('#b-nova-visita').onclick = async () => {
     const v = { id: novoId(), obraId: obra.id, data: hoje(), climaManha: '', climaTarde: '', condicao: '', equipe: '', atividades: '', ocorrencias: '', orientacoes: '', criadoEm: agora(), atualizadoEm: agora() };
@@ -218,13 +305,7 @@ async function telaObra(main, id) {
     obra.atualizadoEm = agora(); await gravar('obras', obra);
     location.hash = '#/visita/' + v.id;
   };
-  $('#b-excluir-obra').onclick = async () => {
-    if (!confirm(`Excluir a obra "${obra.nome}" com ${visitas.length} visita(s) e ${fotos.length} foto(s)? Isso não tem volta (a não ser por um backup).`)) return;
-    for (const f of fotos) await apagar('fotos', f.id);
-    for (const v of visitas) await apagar('visitas', v.id);
-    await apagar('obras', obra.id);
-    aviso('Obra excluída'); location.hash = '#/';
-  };
+  $('#b-excluir-obra').onclick = excluirObra;
 }
 
 async function telaVisita(main, id) {
@@ -307,8 +388,8 @@ async function telaVisita(main, id) {
     const fotos = await porIndice('fotos', 'visitaId', v.id);
     if (!confirm(`Excluir a visita de ${dataBR(v.data)} e ${fotos.length} foto(s)? Isso não tem volta (a não ser por um backup).`)) return;
     clearTimeout(timer); _salvarPendente = null;
-    for (const f of fotos) await apagar('fotos', f.id);
-    await apagar('visitas', v.id);
+    for (const f of fotos) await excluir('fotos', f.id);
+    await excluir('visitas', v.id);
     aviso('Visita excluída'); location.hash = '#/obra/' + obra.id;
   };
 }
@@ -361,9 +442,283 @@ async function mostrarFotos(v, obra) {
   box.querySelectorAll('[data-remover]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('Remover esta foto?')) return;
-      await apagar('fotos', b.dataset.remover); mostrarFotos(v, obra);
+      await excluir('fotos', b.dataset.remover); mostrarFotos(v, obra);
     };
   });
+}
+
+// ---------------------------------------------------------------- financeiro
+let _filtroFin = 'todos';
+const ehComputador = () => !matchMedia('(pointer: coarse)').matches;
+
+async function abaFinanceiro(box, obra, excluirObra) {
+  const ls = (await porIndice('lancamentos', 'obraId', obra.id))
+    .sort((a, b) => (a.vencimento || '').localeCompare(b.vencimento || '') || (a.criadoEm || '').localeCompare(b.criadoEm || ''));
+  const soma = (f) => ls.filter(f).reduce((s, l) => s + (Number(l.valor) || 0), 0);
+  const aReceberTotal = soma((l) => l.tipo === 'Receber'), recebido = soma((l) => l.tipo === 'Receber' && l.pago);
+  const custos = soma((l) => l.tipo === 'Pagar'), pago = soma((l) => l.tipo === 'Pagar' && l.pago);
+  const contrato = Number(obra.valorContrato) || 0, previsto = Number(obra.custoPrevisto) || 0;
+  const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+  const barra = (p, alerta) => `<div class="barra" role="img" aria-label="${p}%"><span class="${alerta ? 'alerta' : ''}" style="width:${Math.min(100, p)}%"></span></div>`;
+  const porClasse = CLASSIFICACOES.map((c) => [c, soma((l) => l.tipo === 'Pagar' && l.classificacao === c)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const filtros = { todos: 'Todos', pagar: 'A pagar (em aberto)', receber: 'A receber (em aberto)', atrasados: 'Atrasados', pagos: 'Pagos / recebidos' };
+  const passa = {
+    todos: () => true, pagar: (l) => l.tipo === 'Pagar' && !l.pago, receber: (l) => l.tipo === 'Receber' && !l.pago,
+    atrasados: (l) => statusDe(l) === 'Atrasado', pagos: (l) => l.pago
+  };
+  if (!passa[_filtroFin]) _filtroFin = 'todos';
+  const lista = ls.filter(passa[_filtroFin]);
+  const saldo = recebido - pago;
+
+  box.innerHTML = `
+    <div class="resumo">
+      <div class="card">
+        <small>Recebido</small>
+        <strong>${moeda(recebido)}</strong>
+        ${contrato ? `${barra(pct(recebido, contrato))}<small>${pct(recebido, contrato)}% do contrato (${moeda(contrato)})</small>` : '<small>Informe o valor do contrato em "Dados da obra"</small>'}
+        ${contrato ? `<small>Falta receber do contrato: ${moeda(contrato - recebido)}</small>` : ''}
+        ${aReceberTotal - recebido > 0 || !contrato ? `<small>Lançado a receber: ${moeda(aReceberTotal - recebido)}</small>` : ''}
+      </div>
+      <div class="card">
+        <small>Custos (pagos + a pagar)</small>
+        <strong>${moeda(custos)}</strong>
+        ${previsto ? `${barra(pct(custos, previsto), custos > previsto)}<small${custos > previsto ? ' class="alerta"' : ''}>${pct(custos, previsto)}% do previsto (${moeda(previsto)})</small>` : '<small>Informe o custo previsto em "Dados da obra"</small>'}
+        <small>Pago: ${moeda(pago)} · A pagar: ${moeda(custos - pago)}</small>
+      </div>
+      <div class="card">
+        <small>Saldo em caixa da obra (recebido − pago)</small>
+        <strong class="${saldo < 0 ? 'alerta' : 'positivo'}">${moeda(saldo)}</strong>
+        ${contrato ? `<small>Resultado previsto (contrato − custos lançados): ${moeda(contrato - custos)}</small>` : ''}
+      </div>
+    </div>
+
+    ${porClasse.length ? `<h2>Custos por classificação</h2>
+    <div class="card classes">${porClasse.map(([c, v]) => `
+      <div><span>${esc(c)}</span><b>${moeda(v)}</b>${barra(pct(v, custos))}</div>`).join('')}
+    </div>` : ''}
+
+    <h2>Lançamentos</h2>
+    <label for="filtro-fin" class="sr">Mostrar</label>
+    <select id="filtro-fin">${Object.entries(filtros).map(([k, t]) => `<option value="${k}"${k === _filtroFin ? ' selected' : ''}>${t}</option>`).join('')}</select>
+    ${lista.length ? `<ul class="lista" style="margin-top:.6rem">${lista.map((l) => {
+      const st = statusDe(l);
+      return `<li><a class="item lanc" href="#/lancamento/${l.id}">
+        <span><strong>${esc(l.descricao)}</strong>
+          <small>${esc(l.classificacao)} · ${l.pago && l.dataPagamento ? 'pago ' + dataBR(l.dataPagamento) : 'venc. ' + dataBR(l.vencimento)}${l.formaPagamento ? ' · ' + esc(l.formaPagamento) : ''}</small></span>
+        <span class="valor"><b class="${l.tipo === 'Receber' ? 'positivo' : ''}">${l.tipo === 'Receber' ? '+' : '−'} ${moeda(l.valor)}</b>
+          <em class="st st-${slug(st)}">${st}</em></span>
+      </a></li>`;
+    }).join('')}</ul>` : '<p class="vazio" style="margin-top:.6rem">Nenhum lançamento aqui.</p>'}
+
+    <div class="botoes lado">
+      <a class="btn sec" href="#/novo-lancamento/${obra.id}/Receber">+ Recebimento</a>
+      <button class="btn sec" id="b-excel-obra" type="button">Exportar planilha</button>
+    </div>
+    <div class="botoes"><button class="btn perigo" id="b-excluir-obra" type="button">Excluir obra</button></div>
+    <a class="btn flutuante" href="#/novo-lancamento/${obra.id}/Pagar">+ Nova despesa</a>`;
+
+  $('#filtro-fin').onchange = (e) => { _filtroFin = e.target.value; abaFinanceiro(box, obra, excluirObra); };
+  $('#b-excel-obra').onclick = (e) => exportarExcel(obra.id, e.currentTarget);
+  $('#b-excluir-obra').onclick = excluirObra;
+}
+
+async function telaLancamento(main, id, obraIdNovo, tipoNovo) {
+  const novo = !id;
+  const receber = tipoNovo === 'Receber';
+  const l = novo
+    ? { id: novoId(), obraId: obraIdNovo, tipo: receber ? 'Receber' : 'Pagar', descricao: '', classificacao: receber ? 'Prestação de serviços' : 'Material', valor: 0, vencimento: hoje(), pago: false, dataPagamento: '', formaPagamento: '', observacao: '' }
+    : await pegar('lancamentos', id);
+  if (!l) { location.hash = '#/'; return; }
+  const obra = await pegar('obras', l.obraId);
+  if (!obra) { location.hash = '#/'; return; }
+  const anexos = novo ? [] : (await porIndice('fotos', 'lancamentoId', l.id)).sort((a, b) => a.ordem - b.ordem);
+  const novosAnexos = [];
+  const voltar = `#/obra/${obra.id}/financeiro`;
+
+  main.innerHTML = `
+    <a class="voltar" href="${voltar}">‹ ${esc(obra.nome)} · Financeiro</a>
+    <h1>${novo ? (receber ? 'Novo recebimento' : 'Nova despesa') : 'Lançamento'}</h1>
+    ${novo ? '' : `<p class="sub">Status: <em class="st st-${slug(statusDe(l))}">${statusDe(l)}</em></p>`}
+    <form id="f-lanc" class="card" autocomplete="off">
+      <div class="segmento" role="radiogroup" aria-label="Tipo">
+        <label><input type="radio" name="tipo" value="Pagar" ${l.tipo === 'Pagar' ? 'checked' : ''}><span>Pagar (saída)</span></label>
+        <label><input type="radio" name="tipo" value="Receber" ${l.tipo === 'Receber' ? 'checked' : ''}><span>Receber (entrada)</span></label>
+      </div>
+      <label for="l-desc">Descrição *</label>
+      <input id="l-desc" name="descricao" required value="${esc(l.descricao)}" placeholder="Ex.: Cimento e areia · Loja X">
+      <label for="l-class">Classificação</label>
+      <select id="l-class" name="classificacao">${opcoes(CLASSIFICACOES, l.classificacao)}</select>
+      <div class="duas">
+        <div><label for="l-valor" id="rot-valor">Valor (R$) *</label><input id="l-valor" name="valor" required inputmode="decimal" value="${valorCampo(l.valor)}" placeholder="0,00"></div>
+        <div><label for="l-venc">Vencimento</label><input id="l-venc" name="vencimento" type="date" value="${esc(l.vencimento)}"></div>
+      </div>
+      <div class="duas">
+        <div><label for="l-forma">Forma de pagamento</label><select id="l-forma" name="formaPagamento">${opcoes(FORMAS, l.formaPagamento)}</select></div>
+        ${novo ? '<div><label for="l-parc">Parcelas</label><input id="l-parc" name="parcelas" type="number" min="1" max="60" value="1" inputmode="numeric"></div>' : '<div></div>'}
+      </div>
+      <p class="sub" id="dica-parc" hidden style="margin:.4rem 0 0">O valor é o <b>total</b>: ele é dividido nas parcelas, com vencimentos mês a mês.</p>
+      <label class="check"><input type="checkbox" name="pago" id="l-pago" ${l.pago ? 'checked' : ''}> <span id="rot-pago">Já foi pago</span></label>
+      <div id="box-datapag" ${l.pago ? '' : 'hidden'}>
+        <label for="l-datapag">Data do pagamento</label>
+        <input id="l-datapag" name="dataPagamento" type="date" value="${esc(l.dataPagamento || hoje())}">
+      </div>
+      <label for="l-obs">Observação</label>
+      <textarea id="l-obs" name="observacao" style="min-height:70px">${esc(l.observacao)}</textarea>
+
+      <label>Comprovantes / notas</label>
+      <div class="fotos" id="anexos"></div>
+      <div class="botoes"><button class="btn" type="submit">Salvar</button></div>
+    </form>
+    ${novo ? '' : '<div class="botoes"><button class="btn perigo" id="b-excluir-lanc" type="button">Excluir lançamento</button></div>'}`;
+
+  const form = $('#f-lanc');
+  const ajustarTextos = () => {
+    const rec = form.tipo.value === 'Receber';
+    $('#rot-pago').textContent = rec ? 'Já foi recebido' : 'Já foi pago';
+    const n = parseInt(form.parcelas?.value, 10) || 1;
+    $('#rot-valor').textContent = n > 1 ? 'Valor total (R$) *' : 'Valor (R$) *';
+    $('#dica-parc').hidden = n <= 1;
+  };
+  form.addEventListener('change', ajustarTextos);
+  form.addEventListener('input', ajustarTextos);
+  ajustarTextos();
+  $('#l-pago').onchange = (e) => { $('#box-datapag').hidden = !e.target.checked; ajustarTextos(); };
+  $('#l-valor').onblur = (e) => { const v = lerValor(e.target.value); e.target.value = v ? valorCampo(v) : ''; };
+
+  const desenharAnexos = () => {
+    limparUrls();
+    const itens = [...anexos.map((a) => ({ ...a, salvo: true })), ...novosAnexos.map((a, i) => ({ ...a, idx: i }))];
+    $('#anexos').innerHTML = itens.map((a) => {
+      const url = URL.createObjectURL(a.blob); _urls.push(url);
+      return `<div class="foto"><img src="${url}" alt="Comprovante" data-ver="${url}">
+        <button type="button" ${a.salvo ? `data-rem-salvo="${a.id}"` : `data-rem-novo="${a.idx}"`}>Remover</button></div>`;
+    }).join('') + `<label class="add-foto">+ Foto do comprovante<input id="i-anexo" type="file" accept="image/*" multiple></label>`;
+    $('#i-anexo').onchange = async (e) => {
+      const arqs = [...e.target.files]; e.target.value = '';
+      for (const arq of arqs) {
+        try { aviso('Preparando foto...', 60000); novosAnexos.push(await processarFoto(arq)); } catch (er) { aviso('Foto não pôde ser lida', 4000); }
+      }
+      aviso(novo ? 'Foto anexada (salva ao tocar em Salvar)' : 'Foto anexada (toque em Salvar)');
+      desenharAnexos();
+    };
+    $('#anexos').querySelectorAll('[data-ver]').forEach((img) => { img.onclick = () => verImagem(img.dataset.ver); });
+    $('#anexos').querySelectorAll('[data-rem-novo]').forEach((b) => { b.onclick = () => { novosAnexos.splice(+b.dataset.remNovo, 1); desenharAnexos(); }; });
+    $('#anexos').querySelectorAll('[data-rem-salvo]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('Remover este comprovante?')) return;
+        await excluir('fotos', b.dataset.remSalvo);
+        anexos.splice(anexos.findIndex((a) => a.id === b.dataset.remSalvo), 1); desenharAnexos();
+      };
+    });
+  };
+  desenharAnexos();
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(form));
+    const valor = lerValor(d.valor);
+    if (!d.descricao.trim() || valor <= 0) { aviso('Preencha a descrição e um valor maior que zero', 3500); return; }
+    const base = {
+      ...l, tipo: d.tipo, descricao: d.descricao.trim(), classificacao: d.classificacao, vencimento: d.vencimento,
+      formaPagamento: d.formaPagamento, pago: !!d.pago, dataPagamento: d.pago ? (d.dataPagamento || hoje()) : '',
+      observacao: d.observacao.trim(), atualizadoEm: agora()
+    };
+    if (!base.criadoEm) base.criadoEm = agora();
+    const n = novo ? Math.max(1, Math.min(60, parseInt(d.parcelas, 10) || 1)) : 1;
+    if (n === 1) { base.valor = valor; await gravar('lancamentos', base); }
+    else {
+      // Divide o total em centavos; a diferença do arredondamento fica na 1ª parcela.
+      const cent = Math.round(valor * 100), parte = Math.floor(cent / n);
+      for (let i = 0; i < n; i++) {
+        await gravar('lancamentos', {
+          ...base, id: i === 0 ? base.id : novoId(), descricao: `${base.descricao} (${i + 1}/${n})`,
+          valor: (parte + (i === 0 ? cent - parte * n : 0)) / 100,
+          vencimento: somarMeses(base.vencimento || hoje(), i),
+          pago: i === 0 ? base.pago : false, dataPagamento: i === 0 ? base.dataPagamento : ''
+        });
+      }
+    }
+    for (const [i, a] of novosAnexos.entries()) {
+      await gravar('fotos', { id: novoId(), lancamentoId: base.id, obraId: obra.id, ordem: Date.now() + i, legenda: 'Comprovante', criadoEm: agora(), atualizadoEm: agora(), ...a });
+    }
+    obra.atualizadoEm = agora(); await gravar('obras', obra);
+    pedirArmazenamentoFixo();
+    aviso(n > 1 ? `${n} parcelas lançadas` : 'Lançamento salvo');
+    location.hash = voltar;
+  };
+
+  if (!novo) {
+    $('#b-excluir-lanc').onclick = async () => {
+      if (!confirm(`Excluir "${l.descricao}" (${moeda(l.valor)})? Isso não tem volta (a não ser por um backup).`)) return;
+      for (const a of anexos) await excluir('fotos', a.id);
+      await excluir('lancamentos', l.id);
+      aviso('Lançamento excluído'); location.hash = voltar;
+    };
+  }
+}
+
+function verImagem(url) {
+  const div = document.createElement('div');
+  div.className = 'ver-imagem'; div.innerHTML = `<img src="${url}" alt="Comprovante"><button type="button" class="btn sec">Fechar</button>`;
+  div.onclick = () => div.remove();
+  document.body.appendChild(div);
+}
+
+// Planilha Excel: aba LANÇAMENTOS (mesmas colunas da planilha da V&M + forma de pagamento e observação) e aba RESUMO.
+async function exportarExcel(obraId, botao) {
+  const txt = botao.textContent; botao.disabled = true; botao.textContent = 'Gerando planilha...';
+  try {
+    await carregarScript(XLSX_URL);
+    const X = window.XLSX;
+    let obras = (await todos('obras')).sort((a, b) => a.nome.localeCompare(b.nome));
+    if (obraId) obras = obras.filter((o) => o.id === obraId);
+    const nome = (id) => (obras.find((o) => o.id === id) || {}).nome || '';
+    const ls = (obraId ? await porIndice('lancamentos', 'obraId', obraId) : await todos('lancamentos'))
+      .filter((l) => nome(l.obraId))
+      .sort((a, b) => nome(a.obraId).localeCompare(nome(b.obraId)) || (a.vencimento || '').localeCompare(b.vencimento || ''));
+    // Data como número do Excel (evita erro de fuso horário)
+    const serial = (iso) => { if (!iso) return ''; const [a, m, d] = iso.split('-').map(Number); return (Date.UTC(a, m - 1, d) - Date.UTC(1899, 11, 30)) / 864e5; };
+
+    const linhas = [['CONTAS A PAGAR E RECEBER - OBRAS'],
+      ['DESCRIÇÃO', 'DATA VENCIMENTO', 'CLASSIFICAÇÃO', 'TIPO', 'CENTRO DE CUSTO', 'VALOR', 'PAGAMENTO', 'DATA PAGAMENTO', 'STATUS', 'FORMA DE PAGAMENTO', 'OBSERVAÇÃO']];
+    for (const l of ls) {
+      linhas.push([l.descricao, serial(l.vencimento), l.classificacao, l.tipo, nome(l.obraId).toUpperCase(), Number(l.valor) || 0,
+        l.pago ? Number(l.valor) || 0 : '', serial(l.dataPagamento), statusDe(l), l.formaPagamento || '', l.observacao || '']);
+    }
+    const ws = X.utils.aoa_to_sheet(linhas);
+    ws['!cols'] = [38, 15, 22, 9, 28, 14, 14, 15, 10, 18, 32].map((wch) => ({ wch }));
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 10 } }];
+    const formatar = (planilha, nLinhas, colunas, z) => {
+      for (let r = 1; r < nLinhas; r++) for (const c of colunas) { const cel = planilha[X.utils.encode_cell({ r, c })]; if (cel && cel.t === 'n') cel.z = z; }
+    };
+    formatar(ws, linhas.length, [5, 6], '"R$" #,##0.00');
+    formatar(ws, linhas.length, [1, 7], 'dd/mm/yyyy');
+
+    const res = [['CENTRO DE CUSTO', 'VALOR DO CONTRATO', 'CUSTO PREVISTO', 'RECEBER (LANÇADO)', 'RECEBIDO', 'PAGAR (LANÇADO)', 'PAGO', 'SALDO EM CAIXA']];
+    for (const o of obras) {
+      const d = ls.filter((l) => l.obraId === o.id);
+      const s = (f) => d.filter(f).reduce((t, l) => t + (Number(l.valor) || 0), 0);
+      const rec = s((l) => l.tipo === 'Receber' && l.pago), pag = s((l) => l.tipo === 'Pagar' && l.pago);
+      res.push([o.nome.toUpperCase(), Number(o.valorContrato) || 0, Number(o.custoPrevisto) || 0, s((l) => l.tipo === 'Receber'), rec, s((l) => l.tipo === 'Pagar'), pag, rec - pag]);
+    }
+    const wr = X.utils.aoa_to_sheet(res);
+    wr['!cols'] = [30, 18, 16, 18, 14, 16, 14, 16].map((wch) => ({ wch }));
+    formatar(wr, res.length, [1, 2, 3, 4, 5, 6, 7], '"R$" #,##0.00');
+
+    const wb = X.utils.book_new();
+    X.utils.book_append_sheet(wb, ws, 'LANÇAMENTOS');
+    X.utils.book_append_sheet(wb, wr, 'RESUMO');
+    const tipo = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const blob = new Blob([X.write(wb, { bookType: 'xlsx', type: 'array' })], { type: tipo });
+    const arq = `financeiro-${obraId ? slug(obras[0]?.nome) : 'todas-as-obras'}-${hoje()}.xlsx`;
+    if (ehComputador()) { baixar(blob, arq); aviso('Planilha baixada (pasta Downloads)', 3500); }
+    else {
+      const r = await compartilharOuBaixar(blob, arq, tipo, 'Financeiro das obras');
+      if (r === 'precisa-toque') baixar(blob, arq);
+      if (r === 'baixado' || r === 'precisa-toque') aviso('Planilha baixada', 3500);
+    }
+  } catch (e) { console.error(e); aviso('Não foi possível gerar a planilha: ' + e.message, 5000); }
+  botao.disabled = false; botao.textContent = txt;
 }
 
 // ---------------------------------------------------------------- PDF
@@ -487,11 +842,12 @@ async function gerarPdf(visitaId) {
 async function fazerBackup() {
   const b = $('#b-backup'); b.disabled = true; b.textContent = 'Preparando...';
   try {
-    const [obras, visitas, fotos] = await Promise.all([todos('obras'), todos('visitas'), todos('fotos')]);
+    const [obras, visitas, fotos, lancamentos, excluidos] = await Promise.all([todos('obras'), todos('visitas'), todos('fotos'), todos('lancamentos'), todos('excluidos')]);
     const fotosJson = [];
     for (const f of fotos) { const { blob, ...resto } = f; fotosJson.push({ ...resto, dados: await blobParaDataUrl(blob) }); }
-    const json = JSON.stringify({ app: 'obras-vm', versao: 1, exportadoEm: agora(), obras, visitas, fotos: fotosJson });
+    const json = JSON.stringify({ app: 'obras-vm', versao: 2, exportadoEm: agora(), obras, visitas, lancamentos, excluidos, fotos: fotosJson });
     const nome = `backup-obras-vm-${hoje()}.json`;
+    if (ehComputador()) { baixar(new Blob([json], { type: 'application/json' }), nome); aviso('Backup baixado (pasta Downloads)', 4000); b.disabled = false; b.textContent = 'Fazer backup'; return; }
     const r = await compartilharOuBaixar(new Blob([json], { type: 'application/json' }), nome, 'application/json', 'Backup Obras V&M');
     if (r === 'baixado') aviso('Backup baixado. Salve o arquivo no Nextcloud.', 4000);
     if (r === 'precisa-toque') { baixar(new Blob([json], { type: 'application/json' }), nome); aviso('Backup baixado. Salve o arquivo no Nextcloud.', 4000); }
@@ -503,7 +859,8 @@ async function restaurarBackup(arquivo) {
   let dados;
   try { dados = JSON.parse(await arquivo.text()); } catch (e) { aviso('Arquivo inválido', 4000); return; }
   if (!dados || dados.app !== 'obras-vm') { aviso('Este arquivo não é um backup do Obras V&M', 4000); return; }
-  if (!confirm(`Restaurar backup de ${new Date(dados.exportadoEm).toLocaleString('pt-BR')}?\n${dados.obras.length} obra(s), ${dados.visitas.length} visita(s), ${dados.fotos.length} foto(s).\n\nO backup é juntado ao que já existe aqui; quando o mesmo registro existe nos dois, fica a versão mais recente.`)) return;
+  dados.lancamentos = dados.lancamentos || []; dados.excluidos = dados.excluidos || [];
+  if (!confirm(`Restaurar backup de ${new Date(dados.exportadoEm).toLocaleString('pt-BR')}?\n${dados.obras.length} obra(s), ${dados.visitas.length} visita(s), ${dados.lancamentos.length} lançamento(s), ${dados.fotos.length} foto(s).\n\nO backup é juntado ao que já existe aqui; quando o mesmo registro existe nos dois, fica a versão mais recente.`)) return;
   const juntar = async (loja, item) => {
     const atual = await pegar(loja, item.id);
     if (!atual || (item.atualizadoEm || '') >= (atual.atualizadoEm || '')) { await gravar(loja, item); return 1; }
@@ -512,6 +869,7 @@ async function restaurarBackup(arquivo) {
   let n = 0;
   for (const o of dados.obras) n += await juntar('obras', o);
   for (const v of dados.visitas) n += await juntar('visitas', v);
+  for (const l of dados.lancamentos) n += await juntar('lancamentos', l);
   for (const f of dados.fotos) {
     const { dados: d, ...resto } = f;
     n += await juntar('fotos', { ...resto, blob: await (await fetch(d)).blob() });
@@ -531,6 +889,15 @@ window.addEventListener('online', mostrarRede);
 window.addEventListener('offline', mostrarRede);
 window.addEventListener('hashchange', rota);
 document.addEventListener('visibilitychange', () => { if (document.hidden && _salvarPendente) _salvarPendente(); });
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(console.error);
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  // Quando chega uma versão nova do app, recarrega uma vez para usá-la (só se já havia uma versão antes).
+  const tinhaVersao = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', async () => {
+    if (!tinhaVersao) return;
+    if (_salvarPendente) await _salvarPendente();
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').catch(console.error);
+}
 mostrarRede();
 rota();

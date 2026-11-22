@@ -1,6 +1,6 @@
 // Guarda os arquivos do app no celular para ele abrir sem internet.
 // Ao mudar qualquer arquivo do app, aumentar a versão abaixo.
-const VERSAO = 'obras-vm-v1';
+const VERSAO = 'obras-vm-v2';
 const ARQUIVOS = [
   './',
   'index.html',
@@ -10,7 +10,8 @@ const ARQUIVOS = [
   'img/logo-vm-clara.png',
   'img/icone-192.png',
   'img/icone-512.png',
-  'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+  'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
 ];
 
 self.addEventListener('install', (e) => {
