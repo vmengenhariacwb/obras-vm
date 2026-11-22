@@ -54,8 +54,9 @@ function tx(loja, modo, fn) {
   }));
 }
 const pegar = (l, id) => tx(l, 'readonly', (s) => s.get(id));
-const gravar = (l, o) => tx(l, 'readwrite', (s) => s.put(o));
-const apagar = (l, id) => tx(l, 'readwrite', (s) => s.delete(id));
+// Toda gravação/exclusão feita pelo usuário agenda uma sincronização com o Drive (ver aoMudar).
+const gravar = (l, o) => tx(l, 'readwrite', (s) => s.put(o)).then((r) => { aoMudar(); return r; });
+const apagar = (l, id) => tx(l, 'readwrite', (s) => s.delete(id)).then((r) => { aoMudar(); return r; });
 const todos = (l) => tx(l, 'readonly', (s) => s.getAll());
 const porIndice = (l, i, v) => tx(l, 'readonly', (s) => s.index(i).getAll(v));
 // Exclusão feita pelo usuário: apaga e anota, para a sincronização saber que foi excluído.
@@ -207,9 +208,22 @@ async function telaInicio(main) {
       <div class="botoes"><button class="btn sec" id="b-excel" type="button">Exportar planilha (todas as obras)</button></div>
     </div>
 
+    <h2>Google Drive</h2>
+    <div class="card" id="card-drive">
+      ${driveConectado() ? `
+        <p class="sub" style="margin:0">Sincronização ligada neste aparelho. As mudanças vão para uma pasta escondida do seu Drive e aparecem nos outros aparelhos conectados.</p>
+        <p class="sub" style="margin:.5rem 0 0">Última sincronização: <b>${esc(ultimaSync())}</b></p>
+        <div class="botoes lado">
+          <button class="btn" id="b-sync" type="button">Sincronizar agora</button>
+          <button class="btn sec" id="b-desconectar" type="button">Desligar neste aparelho</button>
+        </div>` : `
+        <p class="sub" style="margin:0">Ligue para que celular e computador tenham os mesmos dados. Use a mesma conta Google nos dois.</p>
+        <div class="botoes"><button class="btn" id="b-conectar" type="button">Conectar ao Google Drive</button></div>`}
+    </div>
+
     <h2>Cópia de segurança</h2>
     <div class="card">
-      <p class="sub" style="margin:0">Os dados ficam só neste aparelho. Faça um backup no fim de cada visita e salve o arquivo no Nextcloud.</p>
+      <p class="sub" style="margin:0">Cópia extra num arquivo, para guardar no Nextcloud de vez em quando.</p>
       <div class="botoes lado">
         <button class="btn sec" id="b-backup" type="button">Fazer backup</button>
         <label class="btn sec" style="margin:0">Restaurar backup<input id="b-restaurar" type="file" accept=".json,application/json" hidden></label>
@@ -218,6 +232,10 @@ async function telaInicio(main) {
     <p class="rodape-info">${esc(uso)}<br>${EMPRESA.nome} · ${EMPRESA.resp} · ${EMPRESA.crea}</p>
     <a class="btn flutuante" href="#/obra/nova">+ Nova obra</a>`;
 
+  if (navigator.onLine) prepararGoogle().catch(() => {}); // deixa o login pronto para o toque
+  if ($('#b-conectar')) $('#b-conectar').onclick = () => sincronizar(true);
+  if ($('#b-sync')) $('#b-sync').onclick = () => sincronizar(true);
+  if ($('#b-desconectar')) $('#b-desconectar').onclick = desconectarDrive;
   $('#b-excel').onclick = (e) => exportarExcel(null, e.currentTarget);
   $('#b-backup').onclick = fazerBackup;
   $('#b-restaurar').onchange = (e) => { const f = e.target.files[0]; if (f) restaurarBackup(f); e.target.value = ''; };
@@ -879,14 +897,209 @@ async function restaurarBackup(arquivo) {
   rota();
 }
 
-// ---------------------------------------------------------------- início
-function mostrarRede() {
-  const el = $('#status-rede');
-  el.textContent = navigator.onLine ? 'online' : 'sem internet · salvando no aparelho';
-  el.classList.toggle('off', !navigator.onLine);
+// ---------------------------------------------------------------- sincronização (Google Drive)
+// No Drive, numa pasta escondida só do app (appDataFolder):
+//   dados.json      -> obras, visitas, lançamentos, dados das fotos (sem a imagem) e exclusões
+//   foto-<id>.jpg   -> cada foto/comprovante (enviada uma única vez)
+// Junta aparelho + Drive: no mesmo registro fica o editado por último; exclusões valem nos dois.
+const GOOGLE_CLIENT_ID = '175344161275-uojv66bmoob1ab1r2bls69gg75pcr82p.apps.googleusercontent.com';
+const ESCOPO_DRIVE = 'https://www.googleapis.com/auth/drive.appdata';
+const GIS_URL = 'https://accounts.google.com/gsi/client';
+const API = 'https://www.googleapis.com/drive/v3/files';
+const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+const LOJAS_SYNC = ['obras', 'visitas', 'lancamentos'];
+
+let _sincronizando = false, _timerSync, _estadoSync = '', _tokenClient, _respostaToken;
+const ls = { // localStorage pode falhar (modo anônimo): nunca deixar isso quebrar o app
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignora */ } },
+  del(k) { try { localStorage.removeItem(k); } catch (e) { /* ignora */ } }
+};
+const driveConectado = () => ls.get('drive-conectado') === '1';
+function ultimaSync() {
+  const t = ls.get('drive-ultima'); if (!t) return 'ainda não';
+  const d = new Date(t); return `${d.toLocaleDateString('pt-BR')} às ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 }
+function tokenValido() {
+  try { const t = JSON.parse(ls.get('drive-token') || 'null'); return t && t.expira > Date.now() + 60000 ? t.valor : null; } catch (e) { return null; }
+}
+
+function aoMudar() {
+  if (_sincronizando || !driveConectado()) return;
+  clearTimeout(_timerSync);
+  _timerSync = setTimeout(() => sincronizar(false), 8000);
+  mostrarSync('pendente');
+}
+
+function mostrarSync(estado) {
+  if (estado) _estadoSync = estado;
+  const el = $('#status-rede'); if (!el) return;
+  let txt, alerta = false;
+  if (!navigator.onLine) { txt = 'sem internet · salvo no aparelho'; alerta = true; }
+  else if (!driveConectado()) txt = 'só neste aparelho';
+  else txt = {
+    sincronizando: 'sincronizando…', pendente: 'alterações a enviar', ok: '✓ sincronizado',
+    toque: 'toque para sincronizar', erro: 'erro · toque para tentar'
+  }[_estadoSync] || 'Drive conectado';
+  if (['toque', 'erro'].includes(_estadoSync) && navigator.onLine && driveConectado()) alerta = true;
+  el.textContent = txt; el.classList.toggle('off', alerta);
+}
+
+function prepararGoogle() {
+  return carregarScript(GIS_URL).then(() => {
+    if (!_tokenClient) {
+      _tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID, scope: ESCOPO_DRIVE,
+        callback: (r) => _respostaToken && _respostaToken(r),
+        error_callback: (e) => _respostaToken && _respostaToken({ error: e.type || 'popup' })
+      });
+    }
+  });
+}
+// Abre a janelinha do Google (precisa ser logo após um toque do usuário).
+function pedirToken() {
+  return new Promise((ok, erro) => {
+    _respostaToken = (r) => {
+      _respostaToken = null;
+      if (r.error || !r.access_token) { erro(new Error(r.error === 'popup_closed' ? 'janela do Google fechada' : (r.error || 'acesso negado'))); return; }
+      if (!google.accounts.oauth2.hasGrantedAllScopes(r, ESCOPO_DRIVE)) { erro(new Error('é preciso permitir o acesso ao Drive')); return; }
+      ls.set('drive-token', JSON.stringify({ valor: r.access_token, expira: Date.now() + (r.expires_in || 3600) * 1000 }));
+      ok(r.access_token);
+    };
+    _tokenClient.requestAccessToken({ prompt: driveConectado() ? '' : 'consent' });
+  });
+}
+
+async function driveFetch(token, url, op = {}) {
+  const r = await fetch(url, { ...op, headers: { ...(op.headers || {}), Authorization: 'Bearer ' + token } });
+  if (r.status === 401) { ls.del('drive-token'); throw Object.assign(new Error('acesso ao Drive expirou'), { precisaToque: true }); }
+  if (!r.ok) throw new Error(`Drive respondeu ${r.status}`);
+  return r;
+}
+async function driveListar(token) {
+  const arquivos = {}; let pagina = '';
+  do {
+    const r = await (await driveFetch(token, `${API}?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name)${pagina ? '&pageToken=' + pagina : ''}`)).json();
+    for (const f of r.files || []) arquivos[f.name] = f.id;
+    pagina = r.nextPageToken || '';
+  } while (pagina);
+  return arquivos;
+}
+function driveEnviar(token, nome, conteudo, tipo, idExistente) {
+  if (idExistente) return driveFetch(token, `${UPLOAD}/${idExistente}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': tipo }, body: conteudo });
+  const limite = 'obrasvm' + Date.now();
+  const corpo = new Blob([
+    `--${limite}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`, JSON.stringify({ name: nome, parents: ['appDataFolder'] }),
+    `\r\n--${limite}\r\nContent-Type: ${tipo}\r\n\r\n`, conteudo, `\r\n--${limite}--`
+  ]);
+  return driveFetch(token, `${UPLOAD}?uploadType=multipart&fields=id`, { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${limite}` }, body: corpo });
+}
+
+async function sincronizar(peloUsuario) {
+  if (_sincronizando) return;
+  clearTimeout(_timerSync);
+  if (!navigator.onLine) { if (peloUsuario) aviso('Sem internet. Os dados estão salvos no aparelho e serão enviados depois.', 4000); mostrarSync(); return; }
+  let token = tokenValido();
+  try {
+    if (!token) {
+      if (!peloUsuario) { mostrarSync('toque'); return; }
+      await prepararGoogle();
+      token = await pedirToken();
+    }
+  } catch (e) { aviso('Não conectou ao Google: ' + e.message, 5000); mostrarSync('toque'); return; }
+
+  _sincronizando = true; mostrarSync('sincronizando');
+  let mudouAqui = 0;
+  try {
+    const arquivos = await driveListar(token);
+    const remoto = arquivos['dados.json']
+      ? await (await driveFetch(token, `${API}/${arquivos['dados.json']}?alt=media`)).json()
+      : {};
+
+    // 1. Exclusões: junta as dos dois lados
+    const lapides = new Map();
+    for (const e of [...(remoto.excluidos || []), ...(await todos('excluidos'))]) {
+      if (!lapides.has(e.id) || lapides.get(e.id).em < e.em) lapides.set(e.id, e);
+    }
+    for (const e of lapides.values()) await tx('excluidos', 'readwrite', (s) => s.put(e));
+
+    // 2. Obras, visitas e lançamentos: fica o mais recente
+    const final = { excluidos: [...lapides.values()] };
+    for (const loja of LOJAS_SYNC) {
+      const locais = await todos(loja);
+      const mapa = new Map(locais.map((x) => [x.id, x]));
+      for (const r of remoto[loja] || []) {
+        const l = mapa.get(r.id);
+        if (!l || (r.atualizadoEm || '') > (l.atualizadoEm || '')) { mapa.set(r.id, r); await tx(loja, 'readwrite', (s) => s.put(r)); mudouAqui++; }
+      }
+      for (const id of [...mapa.keys()]) {
+        if (lapides.has(id)) { if (locais.some((x) => x.id === id)) { await tx(loja, 'readwrite', (s) => s.delete(id)); mudouAqui++; } mapa.delete(id); }
+      }
+      final[loja] = [...mapa.values()];
+    }
+
+    // 3. Fotos: dados (legenda etc.) pelo mais recente; a imagem vai/vem como arquivo próprio
+    const fotosLocais = new Map((await todos('fotos')).map((f) => [f.id, f]));
+    const fotosFinal = new Map();
+    for (const f of fotosLocais.values()) { const { blob, ...meta } = f; fotosFinal.set(f.id, meta); }
+    for (const r of remoto.fotos || []) {
+      const l = fotosLocais.get(r.id);
+      if (!l) {
+        if (lapides.has(r.id)) continue;
+        fotosFinal.set(r.id, r);
+        const arq = arquivos[`foto-${r.id}.jpg`];
+        if (arq) { const blob = await (await driveFetch(token, `${API}/${arq}?alt=media`)).blob(); await tx('fotos', 'readwrite', (s) => s.put({ ...r, blob })); mudouAqui++; }
+      } else if ((r.atualizadoEm || '') > (l.atualizadoEm || '')) {
+        fotosFinal.set(r.id, r); await tx('fotos', 'readwrite', (s) => s.put({ ...r, blob: l.blob })); mudouAqui++;
+      }
+    }
+    for (const id of lapides.keys()) {
+      fotosFinal.delete(id);
+      if (fotosLocais.has(id)) { await tx('fotos', 'readwrite', (s) => s.delete(id)); mudouAqui++; }
+      // imagem excluída: apaga também o arquivo no Drive
+      if (arquivos[`foto-${id}.jpg`]) await driveFetch(token, `${API}/${arquivos[`foto-${id}.jpg`]}`, { method: 'DELETE' }).catch(() => {});
+    }
+    // envia as imagens que o Drive ainda não tem
+    const faltam = [...fotosLocais.values()].filter((f) => fotosFinal.has(f.id) && f.blob && !arquivos[`foto-${f.id}.jpg`]);
+    for (const [i, f] of faltam.entries()) {
+      if (faltam.length > 1) $('#status-rede').textContent = `enviando foto ${i + 1}/${faltam.length}…`;
+      await driveEnviar(token, `foto-${f.id}.jpg`, f.blob, 'image/jpeg');
+    }
+    final.fotos = [...fotosFinal.values()];
+
+    // 4. Grava o dados.json juntado
+    const json = JSON.stringify({ app: 'obras-vm', versao: 2, atualizadoEm: agora(), ...final });
+    await driveEnviar(token, 'dados.json', new Blob([json], { type: 'application/json' }), 'application/json', arquivos['dados.json']);
+
+    ls.set('drive-conectado', '1'); ls.set('drive-ultima', agora());
+    mostrarSync('ok');
+    if (peloUsuario) aviso(mudouAqui ? `Sincronizado: ${mudouAqui} atualização(ões) recebida(s)` : 'Sincronizado com o Drive');
+  } catch (e) {
+    console.error(e);
+    mostrarSync(e.precisaToque ? 'toque' : 'erro');
+    if (peloUsuario || !e.precisaToque) aviso('Sincronização: ' + e.message, 5000);
+  } finally { _sincronizando = false; }
+
+  // Atualiza a tela se chegou coisa nova (sem atrapalhar quem está digitando um formulário)
+  const tela = location.hash.replace(/^#\/?/, '').split('/')[0];
+  if ((mudouAqui || peloUsuario) && ['', 'obra'].includes(tela) && !_salvarPendente) rota();
+  else if (mudouAqui) aviso('Chegaram dados novos do Drive');
+}
+
+function desconectarDrive() {
+  if (!confirm('Desligar a sincronização neste aparelho? Os dados continuam aqui e no Drive; só param de sincronizar.')) return;
+  const t = tokenValido();
+  if (t && window.google) try { google.accounts.oauth2.revoke(t, () => {}); } catch (e) { /* ignora */ }
+  ls.del('drive-conectado'); ls.del('drive-token'); ls.del('drive-ultima');
+  mostrarSync(''); rota();
+}
+
+// ---------------------------------------------------------------- início
+function mostrarRede() { mostrarSync(); if (navigator.onLine && driveConectado()) sincronizar(false); }
+$('#status-rede').onclick = () => { if (driveConectado()) sincronizar(true); else location.hash = '#/'; };
 window.addEventListener('online', mostrarRede);
-window.addEventListener('offline', mostrarRede);
+window.addEventListener('offline', () => mostrarSync());
+document.addEventListener('visibilitychange', () => { if (!document.hidden && driveConectado() && navigator.onLine && tokenValido()) sincronizar(false); });
 window.addEventListener('hashchange', rota);
 document.addEventListener('visibilitychange', () => { if (document.hidden && _salvarPendente) _salvarPendente(); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
