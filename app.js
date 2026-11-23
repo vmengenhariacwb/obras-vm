@@ -85,6 +85,8 @@ function lerValor(s) {
 const valorCampo = (n) => (n ? Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '');
 // Mesmos status da planilha: Pago, Em dia, Atrasado
 const statusDe = (l) => (l.pago ? 'Pago' : (l.vencimento && l.vencimento < hoje() ? 'Atrasado' : 'Em dia'));
+// Obras antigas (sem o campo) contam como "Em andamento".
+const situacaoDe = (o) => (o && o.situacao === 'Concluída' ? 'Concluída' : 'Em andamento');
 function somarMeses(iso, n) {
   const [a, m, d] = iso.split('-').map(Number);
   const ult = new Date(a, m - 1 + n + 1, 0).getDate();            // último dia do mês de destino
@@ -178,6 +180,13 @@ async function telaInicio(main) {
   const obras = (await todos('obras')).sort((a, b) => (b.atualizadoEm || '').localeCompare(a.atualizadoEm || ''));
   const visitas = await todos('visitas');
   const qtd = (id) => visitas.filter((v) => v.obraId === id).length;
+  const andamento = obras.filter((o) => situacaoDe(o) !== 'Concluída');
+  const concluidas = obras.filter((o) => situacaoDe(o) === 'Concluída');
+  const listaObras = (lista) => `<ul class="lista">${lista.map((o) => `
+      <li><a class="item" href="#/obra/${o.id}">
+        <strong>${esc(o.nome)}</strong>
+        <small>${esc([o.cliente, o.local].filter(Boolean).join(' · '))}${o.cliente || o.local ? ' · ' : ''}${qtd(o.id)} visita(s)</small>
+      </a></li>`).join('')}</ul>`;
   const lancs = await todos('lancamentos');
   const emAberto = lancs.filter((l) => !l.pago && l.vencimento);
   const daqui7 = maisDias(7);
@@ -192,12 +201,10 @@ async function telaInicio(main) {
   main.innerHTML = `
     <h1>Obras</h1>
     <p class="sub">Diário de obra, fotos e relatório de visita.</p>
-    ${obras.length ? `<ul class="lista">${obras.map((o) => `
-      <li><a class="item" href="#/obra/${o.id}">
-        <strong>${esc(o.nome)}</strong>
-        <small>${esc([o.cliente, o.local].filter(Boolean).join(' · '))}${o.cliente || o.local ? ' · ' : ''}${qtd(o.id)} visita(s)</small>
-      </a></li>`).join('')}</ul>`
-      : '<p class="vazio">Nenhuma obra ainda. Toque em <b>+ Nova obra</b> para começar.</p>'}
+    ${!obras.length ? '<p class="vazio">Nenhuma obra ainda. Toque em <b>+ Nova obra</b> para começar.</p>' : `
+      <h2>Em andamento (${andamento.length})</h2>
+      ${andamento.length ? listaObras(andamento) : '<p class="vazio">Nenhuma obra em andamento.</p>'}
+      ${concluidas.length ? `<details class="grupo"><summary>Concluídas (${concluidas.length})</summary>${listaObras(concluidas)}</details>` : ''}`}
 
     ${atrasados.length ? `<h2 class="alerta">Atrasados (${atrasados.length})</h2><ul class="lista">${atrasados.sort((a, b) => a.vencimento.localeCompare(b.vencimento)).map(linhaAlerta).join('')}</ul>` : ''}
     ${proximos.length ? `<h2>Vencem em até 7 dias (${proximos.length})</h2><ul class="lista">${proximos.sort((a, b) => a.vencimento.localeCompare(b.vencimento)).map(linhaAlerta).join('')}</ul>` : ''}
@@ -243,8 +250,9 @@ async function telaInicio(main) {
 
 async function telaObra(main, id, aba) {
   const nova = id === 'nova';
-  const obra = nova ? { id: novoId(), nome: '', cliente: '', local: '', art: '', inicio: '', valorContrato: 0, custoPrevisto: 0 } : await pegar('obras', id);
+  const obra = nova ? { id: novoId(), nome: '', cliente: '', local: '', art: '', inicio: '', valorContrato: 0, custoPrevisto: 0, situacao: 'Em andamento' } : await pegar('obras', id);
   if (!obra) { location.hash = '#/'; return; }
+  const concluida = situacaoDe(obra) === 'Concluída';
   const visitas = nova ? [] : (await porIndice('visitas', 'obraId', obra.id)).sort(porData);
   const fotos = nova ? [] : await porIndice('fotos', 'obraId', obra.id);
   const numero = new Map(visitas.map((v, i) => [v.id, i + 1]));
@@ -252,7 +260,7 @@ async function telaObra(main, id, aba) {
   main.innerHTML = `
     <a class="voltar" href="#/">‹ Obras</a>
     <h1>${nova ? 'Nova obra' : esc(obra.nome)}</h1>
-    ${nova ? '' : `<p class="sub">${esc([obra.cliente, obra.local].filter(Boolean).join(' · '))}</p>`}
+    ${nova ? '' : `<p class="sub"><em class="st st-${slug(situacaoDe(obra))}">${situacaoDe(obra)}</em> ${esc([obra.cliente, obra.local].filter(Boolean).join(' · '))}</p>`}
     <details class="card" ${nova ? 'open' : ''}>
       <summary style="cursor:pointer;color:var(--titulo);font-weight:600">Dados da obra</summary>
       <form id="f-obra">
@@ -269,6 +277,11 @@ async function telaObra(main, id, aba) {
         <div class="duas">
           <div><label for="o-contrato">Valor do contrato (R$)</label><input id="o-contrato" name="valorContrato" inputmode="decimal" value="${valorCampo(obra.valorContrato)}" placeholder="0,00"></div>
           <div><label for="o-previsto">Custo previsto (R$)</label><input id="o-previsto" name="custoPrevisto" inputmode="decimal" value="${valorCampo(obra.custoPrevisto)}" placeholder="0,00"></div>
+        </div>
+        <label>Situação</label>
+        <div class="segmento" role="radiogroup" aria-label="Situação">
+          <label><input type="radio" name="situacao" value="Em andamento" ${concluida ? '' : 'checked'}><span>Em andamento</span></label>
+          <label><input type="radio" name="situacao" value="Concluída" ${concluida ? 'checked' : ''}><span>Concluída</span></label>
         </div>
         <div class="botoes"><button class="btn" type="submit">${nova ? 'Criar obra' : 'Salvar dados'}</button></div>
       </form>
@@ -481,7 +494,10 @@ async function abaFinanceiro(box, obra, excluirObra) {
   const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
   const barra = (p, alerta) => `<div class="barra" role="img" aria-label="${p}%"><span class="${alerta ? 'alerta' : ''}" style="width:${Math.min(100, p)}%"></span></div>`;
   const porClasse = CLASSIFICACOES.map((c) => [c, soma((l) => l.tipo === 'Pagar' && l.classificacao === c)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  const filtros = { todos: 'Todos', pagar: 'A pagar (em aberto)', receber: 'A receber (em aberto)', atrasados: 'Atrasados', pagos: 'Pagos / recebidos' };
+  // Categorias que aparecem nos lançamentos desta obra (na ordem da lista padrão; outras no fim).
+  const usadas = new Set(ls.map((l) => l.classificacao || 'Sem classificação'));
+  const catsObra = [...CLASSIFICACOES.filter((c) => usadas.has(c)), ...[...usadas].filter((c) => !CLASSIFICACOES.includes(c))];
+  const filtros ={ todos: 'Todos', pagar: 'A pagar (em aberto)', receber: 'A receber (em aberto)', atrasados: 'Atrasados', pagos: 'Pagos / recebidos' };
   const passa = {
     todos: () => true, pagar: (l) => l.tipo === 'Pagar' && !l.pago, receber: (l) => l.tipo === 'Receber' && !l.pago,
     atrasados: (l) => statusDe(l) === 'Atrasado', pagos: (l) => l.pago
@@ -534,13 +550,35 @@ async function abaFinanceiro(box, obra, excluirObra) {
       <a class="btn sec" href="#/novo-lancamento/${obra.id}/Receber">+ Recebimento</a>
       <button class="btn sec" id="b-excel-obra" type="button">Exportar planilha</button>
     </div>
-    <div class="botoes"><button class="btn sec" id="b-rel-fin" type="button">Relatório financeiro (PDF · uso interno)</button></div>
+    ${ls.length ? `
+    <details class="card" style="margin-top:1rem">
+      <summary style="cursor:pointer;color:var(--titulo);font-weight:600">Relatório financeiro (PDF · uso interno)</summary>
+      <p class="sub" style="margin:.6rem 0 0">Escolha as categorias que entram no relatório. Com todas marcadas, sai o relatório completo da obra.</p>
+      <div class="cats">${catsObra.map((c) => `
+        <label class="check"><input type="checkbox" class="cat-rel" value="${esc(c)}" checked> ${esc(c)}</label>`).join('')}
+      </div>
+      <div class="botoes lado">
+        <button class="btn sec" id="b-cats-todas" type="button">Marcar todas</button>
+        <button class="btn sec" id="b-cats-nenhuma" type="button">Desmarcar todas</button>
+      </div>
+      <div class="botoes"><button class="btn" id="b-rel-fin" type="button">Gerar relatório</button></div>
+    </details>` : ''}
     <div class="botoes"><button class="btn perigo" id="b-excluir-obra" type="button">Excluir obra</button></div>
     <a class="btn flutuante" href="#/novo-lancamento/${obra.id}/Pagar">+ Nova despesa</a>`;
 
   $('#filtro-fin').onchange = (e) => { _filtroFin = e.target.value; abaFinanceiro(box, obra, excluirObra); };
   $('#b-excel-obra').onclick = (e) => exportarExcel(obra.id, e.currentTarget);
-  $('#b-rel-fin').onclick = (e) => acaoPdf(e.currentTarget, () => gerarRelatorioFinanceiro(obra.id), ehComputador() ? 'baixar' : 'enviar', 'Relatório financeiro');
+  if ($('#b-rel-fin')) {
+    const marcar = (v) => document.querySelectorAll('.cat-rel').forEach((c) => { c.checked = v; });
+    $('#b-cats-todas').onclick = () => marcar(true);
+    $('#b-cats-nenhuma').onclick = () => marcar(false);
+    $('#b-rel-fin').onclick = (e) => {
+      const escolhidas = [...document.querySelectorAll('.cat-rel:checked')].map((c) => c.value);
+      if (!escolhidas.length) { aviso('Marque pelo menos uma categoria'); return; }
+      const filtro = escolhidas.length === catsObra.length ? null : escolhidas;
+      acaoPdf(e.currentTarget, () => gerarRelatorioFinanceiro(obra.id, filtro), ehComputador() ? 'baixar' : 'enviar', 'Relatório financeiro');
+    };
+  }
   $('#b-excluir-obra').onclick = excluirObra;
 }
 
@@ -980,26 +1018,38 @@ async function gerarRelatorioObra(obraId, de, ate) {
 }
 
 // 3) Relatório FINANCEIRO da obra (uso interno; nunca enviar ao cliente)
-async function gerarRelatorioFinanceiro(obraId) {
+// categorias: null = relatório completo; ou lista das classificações escolhidas.
+async function gerarRelatorioFinanceiro(obraId, categorias) {
   const obra = await pegar('obras', obraId);
-  const ls = (await porIndice('lancamentos', 'obraId', obra.id))
+  const todosLs = (await porIndice('lancamentos', 'obraId', obra.id))
     .sort((a, b) => (a.vencimento || '9999').localeCompare(b.vencimento || '9999') || (a.criadoEm || '').localeCompare(b.criadoEm || ''));
-  const soma = (f) => ls.filter(f).reduce((s, l) => s + (Number(l.valor) || 0), 0);
+  const parcial = Array.isArray(categorias) && categorias.length > 0;
+  const ls = parcial ? todosLs.filter((l) => categorias.includes(l.classificacao || 'Sem classificação')) : todosLs;
+  if (!ls.length) throw new Error('nenhum lançamento nas categorias escolhidas');
+  const soma = (f, lista = ls) => lista.filter(f).reduce((s, l) => s + (Number(l.valor) || 0), 0);
   const receber = soma((l) => l.tipo === 'Receber'), recebido = soma((l) => l.tipo === 'Receber' && l.pago);
   const custos = soma((l) => l.tipo === 'Pagar'), pago = soma((l) => l.tipo === 'Pagar' && l.pago);
+  const custosObra = soma((l) => l.tipo === 'Pagar', todosLs);
   const contrato = Number(obra.valorContrato) || 0, previsto = Number(obra.custoPrevisto) || 0;
   const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
   const saldo = recebido - pago;
 
-  const P = await criarPdf('RELATÓRIO FINANCEIRO DA OBRA', `${obra.nome}  ·  uso interno  ·  ${dataBR(hoje())}`);
+  const P = await criarPdf(parcial ? 'RELATÓRIO FINANCEIRO POR CATEGORIA' : 'RELATÓRIO FINANCEIRO DA OBRA', `${obra.nome}  ·  uso interno  ·  ${dataBR(hoje())}`);
   P.quadro([
-    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['Situação', situacaoDe(obra)],
+    ...(parcial ? [['Categorias', categorias.join(', ')]] : []),
     ['Valor do contrato', contrato ? moeda(contrato) : 'não informado'], ['Custo previsto', previsto ? moeda(previsto) : 'não informado'],
-    ['Lançamentos', String(ls.length)], ['Gerado em', dataBR(hoje())]
+    ['Lançamentos', parcial ? `${ls.length} de ${todosLs.length}` : String(ls.length)], ['Gerado em', dataBR(hoje())]
   ]);
 
-  P.titulo('Resumo');
-  const linhasResumo = [
+  P.titulo(parcial ? 'Resumo das categorias escolhidas' : 'Resumo');
+  const linhasResumo = parcial ? [
+    ...(receber ? [['Recebido', moeda(recebido), ''], ['A receber (lançado, em aberto)', moeda(receber - recebido), '']] : []),
+    ['Custos pagos', moeda(pago), ''],
+    ['Custos a pagar (em aberto)', moeda(custos - pago), ''],
+    ['Total de custos das categorias', moeda(custos), custosObra ? `${pct(custos, custosObra)} dos custos da obra` : ''],
+    ...(previsto ? [['Peso no custo previsto da obra', pct(custos, previsto), '']] : [])
+  ] : [
     ['Recebido', moeda(recebido), contrato ? `${pct(recebido, contrato)} do contrato` : ''],
     ['A receber (lançado, em aberto)', moeda(receber - recebido), ''],
     ...(contrato ? [['Falta receber do contrato', moeda(contrato - recebido), '']] : []),
@@ -1013,7 +1063,7 @@ async function gerarRelatorioFinanceiro(obraId) {
     (i, j) => {
       const rot = linhasResumo[i][0];
       if (j === 1 && rot.startsWith('Saldo')) return saldo < 0 ? COR.VERMELHO : COR.VERDE;
-      if (j === 2 && rot.startsWith('Total de custos') && previsto && custos > previsto) return COR.VERMELHO;
+      if (j === 2 && !parcial && rot.startsWith('Total de custos') && previsto && custos > previsto) return COR.VERMELHO;
       return null;
     });
 
@@ -1044,7 +1094,7 @@ async function gerarRelatorioFinanceiro(obraId) {
     P.y -= 2;
     P.tabela(colunas, ls.map((l) => linha(l, l.pago && l.dataPagamento ? l.dataPagamento : l.vencimento)), corSituacao(ls));
   }
-  return P.finalizar(`Relatorio-financeiro-${slug(obra.nome)}-${hoje()}.pdf`, 'documento interno');
+  return P.finalizar(`Relatorio-financeiro-${slug(obra.nome)}${parcial ? '-categorias' : ''}-${hoje()}.pdf`, 'documento interno');
 }
 
 // Botão que gera um PDF e envia (Compartilhar do celular) ou baixa
