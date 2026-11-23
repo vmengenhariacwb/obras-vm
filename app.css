@@ -135,6 +135,23 @@ details.grupo > summary { cursor: pointer; color: var(--titulo); font-weight: 60
 .cats { display: grid; grid-template-columns: 1fr 1fr; gap: 0 .8rem; }
 .cats label.check { margin-top: .7rem; font-size: .92rem; }
 @media (max-width: 380px) { .cats { grid-template-columns: 1fr; } }
+/* Orçamentos */
+.st-vistoria { color: #FFC857; }
+.st-orcando { color: var(--texto); }
+.st-enviado { color: var(--destaque); }
+.st-aprovado { color: var(--whatsapp); }
+.st-recusado { color: var(--texto-2); }
+.item-orc { border-top: 1px solid var(--borda); margin-top: 1rem; padding-top: .9rem; }
+.topo-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: .4rem; color: var(--titulo); }
+.link-perigo { background: none; border: 0; color: var(--perigo); font: inherit; font-size: .85rem; cursor: pointer; padding: .3rem 0; }
+.tres { display: grid; grid-template-columns: .8fr .8fr 1.4fr; gap: .5rem; }
+.tres label { margin: .6rem 0 .2rem; }
+.subtotal { display: block; margin-top: .4rem; color: var(--texto-2); font-size: .82rem; }
+.totais { background: var(--card); display: grid; gap: .45rem; }
+.linha-total { display: flex; justify-content: space-between; gap: .75rem; font-size: .92rem; }
+.linha-total b { color: var(--titulo); white-space: nowrap; }
+.linha-total:last-child:not(.interno) b, .linha-total.interno { border-top: 1px solid var(--borda); padding-top: .45rem; }
+#f-orc h2 { margin-top: 1.4rem; }
 .segmento { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--fundo); border: 1px solid var(--borda); border-radius: 10px; }
 .segmento label { margin: 0; }
 .segmento input { position: absolute; opacity: 0; width: 1px; height: 1px; }

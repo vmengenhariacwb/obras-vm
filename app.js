@@ -22,7 +22,7 @@ let _db;
 function abrirBanco() {
   if (_db) return Promise.resolve(_db);
   return new Promise((ok, erro) => {
-    const r = indexedDB.open('obras-vm', 2);
+    const r = indexedDB.open('obras-vm', 3);
     r.onupgradeneeded = (ev) => {
       const db = r.result;
       if (ev.oldVersion < 1) {
@@ -37,6 +37,10 @@ function abrirBanco() {
         db.createObjectStore('lancamentos', { keyPath: 'id' }).createIndex('obraId', 'obraId');
         r.transaction.objectStore('fotos').createIndex('lancamentoId', 'lancamentoId');
         db.createObjectStore('excluidos', { keyPath: 'id' });
+      }
+      if (ev.oldVersion < 3) {
+        // Versão 3: orçamentos (vistoria técnica + itens). Fotos da vistoria usam visitaId = id do orçamento.
+        db.createObjectStore('orcamentos', { keyPath: 'id' });
       }
     };
     r.onsuccess = () => { _db = r.result; ok(_db); };
@@ -168,6 +172,8 @@ async function rota() {
     else if (tela === 'visita') await telaVisita(main, id);
     else if (tela === 'lancamento') await telaLancamento(main, id);
     else if (tela === 'novo-lancamento') await telaLancamento(main, null, id, extra);
+    else if (tela === 'orcamentos') await telaOrcamentos(main);
+    else if (tela === 'orcamento') await telaOrcamento(main, id);
     else await telaInicio(main);
   } catch (e) {
     console.error(e);
@@ -188,6 +194,9 @@ async function telaInicio(main) {
         <small>${esc([o.cliente, o.local].filter(Boolean).join(' · '))}${o.cliente || o.local ? ' · ' : ''}${qtd(o.id)} visita(s)</small>
       </a></li>`).join('')}</ul>`;
   const lancs = await todos('lancamentos');
+  const orcs = await todos('orcamentos');
+  const orcAbertos = orcs.filter((o) => !['Aprovado', 'Recusado'].includes(o.situacao)).length;
+  const retornos = orcs.filter((o) => o.situacao === 'Enviado' && o.retornarEm && o.retornarEm <= hoje()).sort((a, b) => a.retornarEm.localeCompare(b.retornarEm));
   const emAberto = lancs.filter((l) => !l.pago && l.vencimento);
   const daqui7 = maisDias(7);
   const atrasados = emAberto.filter((l) => l.vencimento < hoje());
@@ -199,8 +208,15 @@ async function telaInicio(main) {
   try { const e = await navigator.storage.estimate(); uso = `Espaço usado no aparelho: ${(e.usage / 1048576).toFixed(1)} MB.`; } catch (e) { /* sem suporte */ }
 
   main.innerHTML = `
+    <nav class="abas">
+      <a href="#/" aria-current="page">Obras</a>
+      <a href="#/orcamentos">Orçamentos${orcAbertos ? ` (${orcAbertos})` : ''}</a>
+    </nav>
     <h1>Obras</h1>
     <p class="sub">Diário de obra, fotos e relatórios de acompanhamento.</p>
+    ${retornos.length ? `<h2 class="alerta">Retornar ao cliente (${retornos.length})</h2><ul class="lista">${retornos.map((o) => `
+      <li><a class="item" href="#/orcamento/${o.id}"><strong>${esc(o.servico || 'Orçamento sem título')}</strong>
+        <small>${esc(o.cliente || '')} · orçamento enviado · retornar em ${dataBR(o.retornarEm)}</small></a></li>`).join('')}</ul>` : ''}
     ${!obras.length ? '<p class="vazio">Nenhuma obra ainda. Toque em <b>+ Nova obra</b> para começar.</p>' : `
       <h2>Em andamento (${andamento.length})</h2>
       ${andamento.length ? listaObras(andamento) : '<p class="vazio">Nenhuma obra em andamento.</p>'}
@@ -928,6 +944,14 @@ async function criarPdf(tituloTopo, linhaTopo) {
     });
     P.y += 5;
   };
+  // Faixa de total (escura) ou subtotal (clara), com o valor à direita
+  P.total = (rot, val, escuro = true) => {
+    P.cabe(10);
+    doc.setFillColor(...(escuro ? COR.NAVY : COR.FUNDO)); doc.rect(M, P.y - 4.8, LARG, 7.4, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...(escuro ? [255, 255, 255] : COR.NAVY));
+    doc.text(pdfTxt(rot), M + 3, P.y); doc.text(pdfTxt(val), M + LARG - 3, P.y, { align: 'right' });
+    P.y += 9;
+  };
   P.assinatura = (dataIso) => {
     P.cabe(38); P.y += 10;
     doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...COR.TEXTO);
@@ -1123,10 +1147,10 @@ async function acaoPdf(botao, gerador, modo, titulo) {
 async function fazerBackup() {
   const b = $('#b-backup'); b.disabled = true; b.textContent = 'Preparando...';
   try {
-    const [obras, visitas, fotos, lancamentos, excluidos] = await Promise.all([todos('obras'), todos('visitas'), todos('fotos'), todos('lancamentos'), todos('excluidos')]);
+    const [obras, visitas, fotos, lancamentos, excluidos, orcamentos] = await Promise.all([todos('obras'), todos('visitas'), todos('fotos'), todos('lancamentos'), todos('excluidos'), todos('orcamentos')]);
     const fotosJson = [];
     for (const f of fotos) { const { blob, ...resto } = f; fotosJson.push({ ...resto, dados: await blobParaDataUrl(blob) }); }
-    const json = JSON.stringify({ app: 'obras-vm', versao: 2, exportadoEm: agora(), obras, visitas, lancamentos, excluidos, fotos: fotosJson });
+    const json = JSON.stringify({ app: 'obras-vm', versao: 2, exportadoEm: agora(), obras, visitas, lancamentos, orcamentos, excluidos, fotos: fotosJson });
     const nome = `backup-obras-vm-${hoje()}.json`;
     if (ehComputador()) { baixar(new Blob([json], { type: 'application/json' }), nome); aviso('Backup baixado (pasta Downloads)', 4000); b.disabled = false; b.textContent = 'Fazer backup'; return; }
     const r = await compartilharOuBaixar(new Blob([json], { type: 'application/json' }), nome, 'application/json', 'Backup Obras V&M');
@@ -1140,7 +1164,7 @@ async function restaurarBackup(arquivo) {
   let dados;
   try { dados = JSON.parse(await arquivo.text()); } catch (e) { aviso('Arquivo inválido', 4000); return; }
   if (!dados || dados.app !== 'obras-vm') { aviso('Este arquivo não é um backup do Obras V&M', 4000); return; }
-  dados.lancamentos = dados.lancamentos || []; dados.excluidos = dados.excluidos || [];
+  dados.lancamentos = dados.lancamentos || []; dados.excluidos = dados.excluidos || []; dados.orcamentos = dados.orcamentos || [];
   if (!confirm(`Restaurar backup de ${new Date(dados.exportadoEm).toLocaleString('pt-BR')}?\n${dados.obras.length} obra(s), ${dados.visitas.length} visita(s), ${dados.lancamentos.length} lançamento(s), ${dados.fotos.length} foto(s).\n\nO backup é juntado ao que já existe aqui; quando o mesmo registro existe nos dois, fica a versão mais recente.`)) return;
   const juntar = async (loja, item) => {
     const atual = await pegar(loja, item.id);
@@ -1151,6 +1175,7 @@ async function restaurarBackup(arquivo) {
   for (const o of dados.obras) n += await juntar('obras', o);
   for (const v of dados.visitas) n += await juntar('visitas', v);
   for (const l of dados.lancamentos) n += await juntar('lancamentos', l);
+  for (const o of dados.orcamentos) n += await juntar('orcamentos', o);
   for (const f of dados.fotos) {
     const { dados: d, ...resto } = f;
     n += await juntar('fotos', { ...resto, blob: await (await fetch(d)).blob() });
@@ -1170,7 +1195,7 @@ const ESCOPO_DRIVE = 'https://www.googleapis.com/auth/drive.appdata';
 const GIS_URL = 'https://accounts.google.com/gsi/client';
 const API = 'https://www.googleapis.com/drive/v3/files';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
-const LOJAS_SYNC = ['obras', 'visitas', 'lancamentos'];
+const LOJAS_SYNC = ['obras', 'visitas', 'lancamentos', 'orcamentos'];
 
 let _sincronizando = false, _timerSync, _estadoSync = '', _tokenClient, _respostaToken;
 const ls = { // localStorage pode falhar (modo anônimo): nunca deixar isso quebrar o app
@@ -1331,7 +1356,8 @@ async function sincronizar(peloUsuario) {
     final.fotos = [...fotosFinal.values()];
 
     // 4. Grava o dados.json juntado
-    const json = JSON.stringify({ app: 'obras-vm', versao: 2, atualizadoEm: agora(), ...final });
+    // ...remoto primeiro: guarda partes que uma versão mais nova do app tenha criado
+    const json = JSON.stringify({ ...remoto, app: 'obras-vm', versao: 2, atualizadoEm: agora(), ...final });
     await driveEnviar(token, 'dados.json', new Blob([json], { type: 'application/json' }), 'application/json', arquivos['dados.json']);
 
     ls.set('drive-conectado', '1'); ls.set('drive-ultima', agora());
@@ -1345,7 +1371,7 @@ async function sincronizar(peloUsuario) {
 
   // Atualiza a tela se chegou coisa nova (sem atrapalhar quem está digitando um formulário)
   const tela = location.hash.replace(/^#\/?/, '').split('/')[0];
-  if ((mudouAqui || peloUsuario) && ['', 'obra'].includes(tela) && !_salvarPendente) rota();
+  if ((mudouAqui || peloUsuario) && ['', 'obra', 'orcamentos'].includes(tela) && !_salvarPendente) rota();
   else if (mudouAqui) aviso('Chegaram dados novos do Drive');
 }
 
