@@ -137,9 +137,11 @@ function erroIA(e) {
   return new Error('a IA respondeu com erro: ' + msg.slice(0, 160));
 }
 
-// Orçamentos anteriores (aprovados primeiro) como exemplo de estilo e preço. Sem nome de cliente nem endereço.
+// Orçamentos anteriores como exemplo de estilo e preço: só os que você ENVIOU ou foram APROVADOS (rascunhos e
+// testes ficam de fora, senão a IA copia o próprio rascunho). Sem nome de cliente nem endereço.
 async function exemplosIA(idAtual) {
-  const os = (await todos('orcamentos')).filter((o) => o.id !== idAtual && (o.itens || []).some((it) => (it.descricao || '').trim()));
+  const os = (await todos('orcamentos')).filter((o) => o.id !== idAtual && ['Aprovado', 'Enviado'].includes(o.situacao)
+    && (o.itens || []).some((it) => (it.descricao || '').trim()));
   const ordem = (o) => (o.situacao === 'Aprovado' ? 0 : o.situacao === 'Enviado' ? 1 : 2);
   return os.sort((a, b) => ordem(a) - ordem(b) || (b.atualizadoEm || '').localeCompare(a.atualizadoEm || '')).slice(0, 3)
     .map((o) => ({
