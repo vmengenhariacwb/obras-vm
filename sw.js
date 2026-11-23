@@ -1,6 +1,6 @@
 // Guarda os arquivos do app no celular para ele abrir sem internet.
 // Ao mudar qualquer arquivo do app, aumentar a versão abaixo.
-const VERSAO = 'obras-vm-v11';
+const VERSAO = 'obras-vm-v12';
 const ARQUIVOS = [
   './',
   'index.html',

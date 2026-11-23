@@ -20,7 +20,8 @@ const FRASES_PROIBIDAS = [
 ];
 // Confere os textos que vão para o cliente; devolve a lista de problemas (vazia = tudo certo)
 function conferirOrcamento(o, completa) {
-  const textos = [o.servico, o.necessidade, o.prazo, o.pagamento, o.observacoes, ...(o.itens || []).map((it) => it.descricao)].join('\n');
+  const textos = [o.servico, o.necessidade, o.prazo, o.pagamento, o.observacoes, ...(o.itens || []).map((it) => it.descricao),
+    ...(o.fornecimento === 'mo' ? (o.materiais || []).map((m) => `${m.descricao} ${m.qtd}`) : [])].join('\n');
   const prob = FRASES_PROIBIDAS.filter(([re]) => re.test(textos)).map(([, f]) => `tirar a expressão "${f}" (a V&M é engenharia civil e emite ART)`);
   if (/\[[^\]]*\]|a definir/i.test(textos)) prob.push('há texto por preencher ("[...]" ou "a definir")');
   if (completa) {
@@ -43,10 +44,23 @@ function totaisOrc(o) {
   const its = o.itens || [];
   const soma = (f) => centavos(its.reduce((s, it) => s + centavos((Number(it.qtd) || 0) * (Number(f(it)) || 0)), 0));
   if (o.fornecimento === 'mo') {
-    const mo = soma((it) => it.valorMo), mat = soma((it) => it.valorMat);
+    // Material: lista própria (desde a v12); orçamentos antigos tinham o material dentro de cada item
+    const lista = o.materiais && o.materiais.length;
+    const mo = soma((it) => it.valorMo);
+    const mat = lista ? centavos(o.materiais.reduce((s, m) => s + (Number(m.valor) || 0), 0)) : soma((it) => it.valorMat);
     return { contrato: mo, mo, mat };
   }
   return { contrato: soma((it) => it.valor), mo: 0, mat: 0 };
+}
+
+// Faixa do material (ex.: R$ 1.500 a R$ 2.500). Sem faixa preenchida, vale a soma dos valores da lista.
+function faixaMaterial(o) {
+  const min = Number(o.materialMin) || 0, max = Number(o.materialMax) || 0;
+  return min > 0 && max >= min ? { min, max } : null;
+}
+function textoMaterial(o, t) {
+  const f = faixaMaterial(o);
+  return f ? (f.min === f.max ? moeda(f.min) : `${moeda(f.min)} a ${moeda(f.max)}`) : moeda(t.mat);
 }
 
 // ---------------------------------------------------------------- valor global e modelos
@@ -264,6 +278,14 @@ async function telaOrcamento(main, id) {
   const o = await pegar('orcamentos', id);
   if (!o) { location.hash = '#/orcamentos'; return; }
   o.itens = o.itens || [];
+  // Orçamento antigo com material dentro de cada item: passa para a lista de materiais
+  if (!o.materiais) {
+    o.materiais = o.itens.filter((it) => Number(it.valorMat) > 0).map((it) => ({
+      id: novoId(), descricao: `Material: ${it.descricao || ''}`.trim(), qtd: `${qtdTexto(it.qtd)} ${it.un || ''}`.trim(),
+      valor: centavos((Number(it.qtd) || 0) * Number(it.valorMat))
+    }));
+    o.itens.forEach((it) => { it.valorMat = 0; });
+  }
   await garantirModelos();
   const modelos = (await todos('modelos')).sort(porNome);
   const obra = o.obraId ? await pegar('obras', o.obraId) : null;
@@ -345,6 +367,7 @@ async function telaOrcamento(main, id) {
         <button class="btn sec" id="b-add-item" type="button">+ Adicionar item</button>
         <button class="btn sec" id="b-salvar-modelo" type="button">Salvar como modelo</button>
       </div>
+      <div id="box-mat"></div>
       <div class="card totais" id="totais" style="margin:1rem 0 0"></div>
 
       ${area('prazo', 'Prazo de execução', 'Ex.: 15 dias úteis após o início')}
@@ -390,7 +413,6 @@ async function telaOrcamento(main, id) {
             ? `<div><label>M. obra unit.</label><input name="it-mo" inputmode="decimal" value="${valorCampo(it.valorMo)}" placeholder="0,00" aria-label="Mão de obra por unidade, item ${i + 1}"></div>`
             : `<div><label>Valor unit.</label><input name="it-valor" inputmode="decimal" value="${valorCampo(it.valor)}" placeholder="0,00" aria-label="Valor por unidade, item ${i + 1}"></div>`}
         </div>
-        ${ehMo() ? `<label>Material estimado por unidade (R$, referência)</label><input name="it-mat" inputmode="decimal" value="${valorCampo(it.valorMat)}" placeholder="0,00" aria-label="Material estimado por unidade, item ${i + 1}">` : ''}
         <small class="subtotal" data-sub="${i}"></small>
       </div>`).join('');
     $('#itens').querySelectorAll('[data-rem]').forEach((b) => {
@@ -399,8 +421,51 @@ async function telaOrcamento(main, id) {
         await salvarAgora(); o.itens.splice(Number(b.dataset.rem), 1); fecharNoGlobal(o); await salvarAgora(true); desenharItens();
       };
     });
+    desenharMateriais();
     mostrarTotais();
   };
+  // ----- materiais por conta do cliente (só no "Só mão de obra"): lista própria + faixa de valor
+  const desenharMateriais = () => {
+    const box = $('#box-mat');
+    if (!ehMo()) { box.innerHTML = ''; return; }
+    box.innerHTML = `
+      <div class="mat-box">
+        <h3>Materiais (por conta do cliente)</h3>
+        <p class="sub" style="margin:0">Estimativa para o cliente comprar. Vai no PDF separada da mão de obra, como referência.</p>
+        ${o.materiais.map((m, i) => `
+          <div class="mat-linha" data-i="${i}">
+            <textarea name="mt-desc" rows="1" placeholder="Material (ex.: ripas de madeira tratada)" aria-label="Material ${i + 1}">${esc(m.descricao)}</textarea>
+            <div class="mat-campos">
+              <input name="mt-qtd" value="${esc(m.qtd)}" placeholder="Qtd. (ex.: aprox. 150 m)" aria-label="Quantidade do material ${i + 1}">
+              <input name="mt-valor" inputmode="decimal" value="${valorCampo(m.valor)}" placeholder="R$ estimado" aria-label="Valor estimado do material ${i + 1}">
+              <button type="button" class="link-perigo" data-rem-mat="${i}" aria-label="Remover material ${i + 1}">✕</button>
+            </div>
+          </div>`).join('')}
+        <div class="botoes"><button class="btn sec" id="b-add-mat" type="button">+ Adicionar material</button></div>
+        <label style="margin-top:1rem">Faixa estimada do material (vai no PDF)</label>
+        <div class="duas" style="margin-top:0">
+          <input name="materialMin" inputmode="decimal" value="${valorCampo(o.materialMin)}" placeholder="De R$" aria-label="Faixa do material, valor mínimo">
+          <input name="materialMax" inputmode="decimal" value="${valorCampo(o.materialMax)}" placeholder="Até R$" aria-label="Faixa do material, valor máximo">
+        </div>
+        <p class="sub" style="margin:.3rem 0 0">Em branco, o PDF mostra a soma dos valores da lista (<span id="soma-mat">${moeda(totaisOrc(o).mat)}</span>).</p>
+      </div>`;
+    box.querySelectorAll('textarea').forEach((t) => {
+      const ajustar = () => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 2 + 'px'; };
+      t.addEventListener('input', ajustar); ajustar();
+    });
+    box.querySelectorAll('[data-rem-mat]').forEach((b) => {
+      b.onclick = async () => { await salvarAgora(); o.materiais.splice(Number(b.dataset.remMat), 1); await salvarAgora(true); desenharMateriais(); mostrarTotais(); };
+    });
+    $('#b-add-mat').onclick = async () => {
+      await salvarAgora(); o.materiais.push({ id: novoId(), descricao: '', qtd: '', valor: 0 }); await salvarAgora(true); desenharMateriais();
+      const ds = box.querySelectorAll('[name="mt-desc"]'); ds[ds.length - 1].focus();
+    };
+  };
+  const lerMateriais = () => [...document.querySelectorAll('.mat-linha')].map((el) => ({
+    ...(o.materiais[Number(el.dataset.i)] || { id: novoId() }),
+    descricao: el.querySelector('[name="mt-desc"]').value, qtd: el.querySelector('[name="mt-qtd"]').value,
+    valor: lerValor(el.querySelector('[name="mt-valor"]').value)
+  }));
   const lerItens = () => [...document.querySelectorAll('.item-orc')].map((el) => {
     const v = (n) => { const x = el.querySelector(`[name="${n}"]`); return x ? x.value : undefined; };
     const it = { ...(o.itens[Number(el.dataset.i)] || { id: novoId() }), descricao: v('it-desc'), un: v('it-un'), qtd: lerValor(v('it-qtd')) };
@@ -415,10 +480,11 @@ async function telaOrcamento(main, id) {
       const s = document.querySelector(`[data-sub="${i}"]`); if (!s) return;
       const q = Number(it.qtd) || 0;
       s.textContent = (ehMo()
-        ? `Mão de obra: ${moeda(q * (it.valorMo || 0))} · Material estimado: ${moeda(q * (it.valorMat || 0))}`
+        ? `Mão de obra: ${moeda(q * (it.valorMo || 0))}`
         : `Subtotal: ${moeda(q * (it.valor || 0))}`) + (comGlobal && it.fixo ? ' · valor fixado por você' : '');
     });
     const t = totaisOrc(o), custo = Number(o.custoEstimado) || 0;
+    if ($('#soma-mat')) $('#soma-mat').textContent = moeda(t.mat);
     const dif = comGlobal ? centavos(o.valorGlobal - (ehMo() ? t.mo : t.contrato)) : 0;
     const global = comGlobal ? `<div class="linha-total interno"><span>Valor global combinado</span><b class="${dif ? 'alerta' : 'positivo'}">${moeda(o.valorGlobal)}${dif > 0 ? ` · faltam ${moeda(dif)}` : dif < 0 ? ` · passou ${moeda(-dif)}` : ' ✓'}</b></div>` : '';
     $('#dica-rapido').innerHTML = comGlobal
@@ -427,8 +493,8 @@ async function telaOrcamento(main, id) {
     const margem = custo && t.contrato ? `<div class="linha-total interno"><span>Margem estimada (só você vê)</span><b class="${t.contrato - custo < 0 ? 'alerta' : 'positivo'}">${moeda(t.contrato - custo)} · ${Math.round(((t.contrato - custo) / t.contrato) * 100)}%</b></div>` : '';
     $('#totais').innerHTML = ehMo() ? `
       <div class="linha-total"><span>Mão de obra (valor da proposta)</span><b>${moeda(t.mo)}</b></div>
-      <div class="linha-total"><span>Material estimado (cliente compra)</span><b>${moeda(t.mat)}</b></div>
-      <div class="linha-total"><span>Total estimado para o cliente</span><b>${moeda(t.mo + t.mat)}</b></div>${global}${margem}` : `
+      <div class="linha-total"><span>Material estimado (cliente compra)</span><b>${textoMaterial(o, t)}</b></div>
+      <div class="linha-total"><span>Total estimado para o cliente</span><b>${faixaMaterial(o) ? `${moeda(t.mo + faixaMaterial(o).min)} a ${moeda(t.mo + faixaMaterial(o).max)}` : moeda(t.mo + t.mat)}</b></div>${global}${margem}` : `
       <div class="linha-total"><span>Valor total (material + mão de obra)</span><b>${moeda(t.contrato)}</b></div>${global}${margem}`;
   };
   // Atualiza só os campos de valor (sem redesenhar, para não tirar o cursor de onde você está)
@@ -447,10 +513,11 @@ async function telaOrcamento(main, id) {
   const salvarAgora = async (semLer) => {
     clearTimeout(timer); _salvarPendente = null;
     const d = { ...Object.fromEntries(new FormData($('#f-orc'))), ...Object.fromEntries(new FormData($('#f-orc2'))) };
-    for (const k of Object.keys(d)) if (k.startsWith('it-')) delete d[k];
+    for (const k of Object.keys(d)) if (k.startsWith('it-') || k.startsWith('mt-')) delete d[k];
     d.validadeDias = parseInt(d.validadeDias, 10) || 15;
     d.custoEstimado = lerValor(d.custoEstimado);
-    if (!semLer) o.itens = lerItens();
+    for (const k of ['materialMin', 'materialMax']) if (k in d) d[k] = lerValor(d[k]);
+    if (!semLer) { o.itens = lerItens(); if ($('.mat-box')) o.materiais = lerMateriais(); }
     Object.assign(o, d, { atualizadoEm: agora() });
     await gravar('orcamentos', o);
     mostrarTotais();
@@ -542,9 +609,17 @@ async function telaOrcamento(main, id) {
       o.itens = r.itens.map((x) => ({
         id: novoId(), descricao: String(x.descricao || '').trim(), un: String(x.un || 'vb').trim(),
         qtd: Number(x.qtd) > 0 ? Number(x.qtd) : 1, valor: 0, valorMo: 0,
-        valorMat: forn === 'mo' ? centavos(Number(x.material_unit) || 0) : 0,
-        [campo]: centavos(Number(x.valor_unit) || 0)
+        valorMat: 0, [campo]: centavos(Number(x.valor_unit) || 0)
       }));
+      // Materiais do cliente (só no "Só mão de obra"): lista + faixa
+      if (forn === 'mo') {
+        o.materiais = (r.materiais || []).filter((m) => String(m.descricao || '').trim()).map((m) => ({
+          id: novoId(), descricao: String(m.descricao).trim(), qtd: String(m.quantidade || '').trim(), valor: centavos(Number(m.valor_estimado) || 0)
+        }));
+        const fmin = Math.round(Number(r.material_faixa_min) || 0), fmax = Math.round(Number(r.material_faixa_max) || 0);
+        o.materialMin = fmin > 0 && fmax >= fmin ? fmin : 0;
+        o.materialMax = fmin > 0 && fmax >= fmin ? fmax : 0;
+      }
       // Valor global pedido: o app reparte na proporção que a IA sugeriu e garante a soma exata
       const g = centavos(Number(r.valor_global) || 0);
       o.valorGlobal = g > 0 ? g : 0;
@@ -552,7 +627,8 @@ async function telaOrcamento(main, id) {
       const por = (id, v) => { const el = $('#o-' + id); if (el && typeof v === 'string') el.value = v.trim(); };
       por('servico', r.servico); por('necessidade', r.escopo); por('prazo', r.prazo); por('observacoes', r.observacoes);
       $('#t-orc').textContent = $('#o-servico').value || 'Nova vistoria';
-      await salvarAgora(true); desenharItens();
+      desenharItens();   // primeiro desenha (a faixa do material vai para a tela), depois salva
+      await salvarAgora(true);
       $('#r-global').value = valorCampo(o.valorGlobal);
       const avisos = [...(r.avisos || []), ...conferirOrcamento(o, false).map((p) => 'Conferir: ' + p)];
       $('#ia-avisos').innerHTML = `<div class="ia-avisos">
@@ -704,13 +780,30 @@ function pdfValores(P, o, its, t, mo) {
   P.titulo('Mão de obra');
   P.tabela(cols('Valor unit.', 'Total'), linhas(its, 'valorMo'));
   P.y -= 2; P.total('VALOR DA MÃO DE OBRA', moeda(t.mo));
-  const mats = its.filter((it) => Number(it.valorMat) > 0);
-  if (mats.length) {
+  const aviso = 'Valores de referência, estimados na data deste orçamento. A compra dos materiais é feita pelo cliente e os preços podem variar conforme o fornecedor e a data da compra. Este valor não faz parte do valor da proposta.';
+  const lista = (o.materiais || []).filter((m) => (m.descricao || '').trim());
+  const faixa = faixaMaterial(o);
+  if (lista.length) {
+    // Lista de materiais (como na proposta oficial): material, quantidade aproximada e valor estimado
     P.y += 3;
     P.titulo('Estimativa de materiais (por conta do cliente)');
-    P.tabela(cols('Ref. unit.', 'Estimado'), linhas(mats, 'valorMat'));
-    P.y -= 2; P.total('MATERIAL ESTIMADO (REFERÊNCIA)', moeda(t.mat), false);
-    P.paragrafo('Valores de referência, estimados na data deste orçamento. A compra dos materiais é feita pelo cliente e os preços podem variar conforme o fornecedor e a data da compra. Este valor não faz parte do valor da proposta.', '', 9);
+    const comValor = lista.some((m) => Number(m.valor) > 0);
+    P.tabela(comValor
+      ? [{ t: 'Item', w: 11 }, { t: 'Material', w: 99 }, { t: 'Quantidade aprox.', w: 40 }, { t: 'Estimado', w: 30, a: 'right' }]
+      : [{ t: 'Item', w: 11 }, { t: 'Material', w: 119 }, { t: 'Quantidade aprox.', w: 50 }],
+    lista.map((m, i) => [String(i + 1), m.descricao.trim(), (m.qtd || '').trim() || '-', ...(comValor ? [Number(m.valor) > 0 ? moeda(m.valor) : '-'] : [])]));
+    if (faixa || t.mat) { P.y -= 2; P.total(faixa ? 'FAIXA ESTIMADA DE MATERIAL (REFERÊNCIA)' : 'MATERIAL ESTIMADO (REFERÊNCIA)', textoMaterial(o, t), false); }
+    P.paragrafo(aviso, '', 9);
+    return;
+  }
+  // Orçamento antigo (material dentro de cada item) ou só a faixa preenchida
+  const mats = its.filter((it) => Number(it.valorMat) > 0);
+  if (mats.length || faixa) {
+    P.y += 3;
+    P.titulo('Estimativa de materiais (por conta do cliente)');
+    if (mats.length) P.tabela(cols('Ref. unit.', 'Estimado'), linhas(mats, 'valorMat'));
+    P.y -= 2; P.total(faixa ? 'FAIXA ESTIMADA DE MATERIAL (REFERÊNCIA)' : 'MATERIAL ESTIMADO (REFERÊNCIA)', textoMaterial(o, t), false);
+    P.paragrafo(aviso, '', 9);
   }
 }
 

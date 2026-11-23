@@ -52,7 +52,7 @@ Como montar:
 - Valores: siga a tabela de preços de referência abaixo (valores ao cliente, de mão de obra, salvo quando a tabela diz "com material"). Prefira o "Típico"; em área pequena use o topo da faixa. Use valores redondos, sem centavos.
 - Valor global: se ele disser um valor total (ex.: "18 mil", "valor global 18.000", "fechado em 7.500"), coloque em valor_global e distribua de forma coerente entre os itens (o app acerta a soma exata). Se ele não disser, valor_global = 0 e você precifica pela tabela.
 - Fornecimento: "mo" quando ele disser que o material é por conta do cliente ou "só mão de obra"; "global" quando for material e mão de obra juntos (aí o valor unitário já inclui o material: estime com bom senso e avise em "avisos"). Se ele não disser, mantenha o fornecimento atual.
-- No fornecimento "mo", material_unit é a estimativa de material por unidade (referência para o cliente comprar). No "global", material_unit = 0.
+- Materiais (só no fornecimento "mo"): monte a lista do que o cliente vai comprar, como nas propostas da V&M (ex.: ripas de madeira tratada, caibros/terças para troca pontual, telhas de reposição do mesmo modelo, argamassa, pregos e fixadores, caçamba para entulho). Em cada material, a quantidade aproximada em texto ("aprox. 150 m", "aprox. 10% da área", "1 vb", "1 un") e o valor estimado a preço de loja de Curitiba (redondo). Depois, uma faixa para o total de material (material_faixa_min e material_faixa_max), redonda, com o máximo cerca de 40% a 70% acima do mínimo, cobrindo a variação de preço entre lojas. No "global", materiais = [] e a faixa = 0.
 - Escopo: um parágrafo de 2 a 5 frases descrevendo o que será feito, com base na vistoria. Profissional e sem valores.
 - Prazo: estimativa realista em dias úteis; em serviço externo, diga que pode estender em caso de chuva.
 - Observações: o que não está incluso, em 1 a 3 frases curtas (ex.: "Não incluso: pintura e forro.").
@@ -79,19 +79,34 @@ const ESQUEMA_IA = {
           descricao: { type: 'string' },
           un: { type: 'string' },
           qtd: { type: 'number' },
-          valor_unit: { type: 'number', description: 'Valor por unidade que vai ao cliente (mão de obra no "mo"; material + mão de obra no "global")' },
-          material_unit: { type: 'number', description: 'Só no "mo": material estimado por unidade. No "global", 0.' }
+          valor_unit: { type: 'number', description: 'Valor por unidade que vai ao cliente (mão de obra no "mo"; material + mão de obra no "global")' }
         },
-        required: ['descricao', 'un', 'qtd', 'valor_unit', 'material_unit'],
+        required: ['descricao', 'un', 'qtd', 'valor_unit'],
         additionalProperties: false
       }
     },
+    materiais: {
+      type: 'array',
+      description: 'Só no "mo": materiais que o cliente compra. No "global", lista vazia.',
+      items: {
+        type: 'object',
+        properties: {
+          descricao: { type: 'string' },
+          quantidade: { type: 'string', description: 'Quantidade aproximada em texto, ex.: "aprox. 150 m"' },
+          valor_estimado: { type: 'number' }
+        },
+        required: ['descricao', 'quantidade', 'valor_estimado'],
+        additionalProperties: false
+      }
+    },
+    material_faixa_min: { type: 'number' },
+    material_faixa_max: { type: 'number' },
     valor_global: { type: 'number', description: 'Valor total que o Vinicius pediu; 0 se ele não disse' },
     prazo: { type: 'string' },
     observacoes: { type: 'string' },
     avisos: { type: 'array', items: { type: 'string' } }
   },
-  required: ['servico', 'escopo', 'fornecimento', 'itens', 'valor_global', 'prazo', 'observacoes', 'avisos'],
+  required: ['servico', 'escopo', 'fornecimento', 'itens', 'materiais', 'material_faixa_min', 'material_faixa_max', 'valor_global', 'prazo', 'observacoes', 'avisos'],
   additionalProperties: false
 };
 
@@ -144,8 +159,11 @@ async function montarComIA(o, pedido) {
     servico: o.servico, necessidade_vistoria: o.necessidade, medidas_e_anotacoes: o.medidas, local: o.local,
     fornecimento_atual: o.fornecimento === 'mo' ? 'mo' : 'global',
     itens: (o.itens || []).filter((it) => (it.descricao || '').trim()).map((it) => ({
-      descricao: it.descricao, un: it.un, qtd: it.qtd, valor_unit: o.fornecimento === 'mo' ? it.valorMo : it.valor, material_unit: it.valorMat || 0
+      descricao: it.descricao, un: it.un, qtd: it.qtd, valor_unit: o.fornecimento === 'mo' ? it.valorMo : it.valor
     })),
+    materiais: o.fornecimento === 'mo' ? (o.materiais || []).filter((m) => (m.descricao || '').trim())
+      .map((m) => ({ descricao: m.descricao, quantidade: m.qtd, valor_estimado: m.valor || 0 })) : [],
+    material_faixa: o.fornecimento === 'mo' ? [o.materialMin || 0, o.materialMax || 0] : [],
     prazo: o.prazo, observacoes: o.observacoes
   };
   const conteudo = [
