@@ -522,7 +522,7 @@ async function abaFinanceiro(box, obra, excluirObra) {
       const st = statusDe(l);
       return `<li><a class="item lanc" href="#/lancamento/${l.id}">
         <span><strong>${esc(l.descricao)}</strong>
-          <small>${esc(l.classificacao)} · ${l.pago && l.dataPagamento ? 'pago ' + dataBR(l.dataPagamento) : 'venc. ' + dataBR(l.vencimento)}${l.formaPagamento ? ' · ' + esc(l.formaPagamento) : ''}</small></span>
+          <small>${esc(l.classificacao)} · ${l.pago && l.dataPagamento ? 'pago ' + dataBR(l.dataPagamento) : (l.vencimento ? 'venc. ' + dataBR(l.vencimento) : 'sem vencimento')}${l.formaPagamento ? ' · ' + esc(l.formaPagamento) : ''}</small></span>
         <span class="valor"><b class="${l.tipo === 'Receber' ? 'positivo' : ''}">${l.tipo === 'Receber' ? '+' : '−'} ${moeda(l.valor)}</b>
           <em class="st st-${slug(st)}">${st}</em></span>
       </a></li>`;
@@ -700,8 +700,11 @@ async function exportarExcel(obraId, botao) {
     const linhas = [['CONTAS A PAGAR E RECEBER - OBRAS'],
       ['DESCRIÇÃO', 'DATA VENCIMENTO', 'CLASSIFICAÇÃO', 'TIPO', 'CENTRO DE CUSTO', 'VALOR', 'PAGAMENTO', 'DATA PAGAMENTO', 'STATUS', 'FORMA DE PAGAMENTO', 'OBSERVAÇÃO']];
     for (const l of ls) {
-      linhas.push([l.descricao, serial(l.vencimento), l.classificacao, l.tipo, nome(l.obraId).toUpperCase(), Number(l.valor) || 0,
-        l.pago ? Number(l.valor) || 0 : '', serial(l.dataPagamento), statusDe(l), l.formaPagamento || '', l.observacao || '']);
+      // Igual à planilha da V&M: despesas com valor negativo, PAGAMENTO = "Pago"/"Em aberto", STATUS = Pago/Atrasado/À pagar
+      const valor = (Number(l.valor) || 0) * (l.tipo === 'Pagar' ? -1 : 1);
+      const st = statusDe(l) === 'Em dia' ? (l.tipo === 'Pagar' ? 'À pagar' : 'À receber') : statusDe(l);
+      linhas.push([l.descricao, serial(l.vencimento), l.classificacao, l.tipo, nome(l.obraId).toUpperCase(), valor,
+        l.pago ? 'Pago' : 'Em aberto', serial(l.dataPagamento), st, l.formaPagamento || '', l.observacao || '']);
     }
     const ws = X.utils.aoa_to_sheet(linhas);
     ws['!cols'] = [38, 15, 22, 9, 28, 14, 14, 15, 10, 18, 32].map((wch) => ({ wch }));
@@ -709,7 +712,7 @@ async function exportarExcel(obraId, botao) {
     const formatar = (planilha, nLinhas, colunas, z) => {
       for (let r = 1; r < nLinhas; r++) for (const c of colunas) { const cel = planilha[X.utils.encode_cell({ r, c })]; if (cel && cel.t === 'n') cel.z = z; }
     };
-    formatar(ws, linhas.length, [5, 6], '"R$" #,##0.00');
+    formatar(ws, linhas.length, [5], '"R$" #,##0.00;-"R$" #,##0.00');
     formatar(ws, linhas.length, [1, 7], 'dd/mm/yyyy');
 
     const res = [['CENTRO DE CUSTO', 'VALOR DO CONTRATO', 'CUSTO PREVISTO', 'RECEBER (LANÇADO)', 'RECEBIDO', 'PAGAR (LANÇADO)', 'PAGO', 'SALDO EM CAIXA']];
