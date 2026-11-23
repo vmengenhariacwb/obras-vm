@@ -49,9 +49,167 @@ function totaisOrc(o) {
   return { contrato: soma((it) => it.valor), mo: 0, mat: 0 };
 }
 
+// ---------------------------------------------------------------- valor global e modelos
+// Campo do valor que vai para o cliente: "valor" (material + MO) ou "valorMo" (só mão de obra)
+const campoValor = (o) => (o.fornecimento === 'mo' ? 'valorMo' : 'valor');
+const totalItem = (it, campo) => centavos((Number(it.qtd) || 0) * (Number(it[campo]) || 0));
+
+// Reparte "total" na proporção dos pesos (pesos zerados = partes iguais).
+// Arredonda em reais quando o total é redondo; o maior item fica com a diferença do arredondamento.
+function repartir(total, pesos) {
+  total = centavos(total);
+  if (!pesos.length) return [];
+  let p = pesos.map((x) => Math.max(0, Number(x) || 0));
+  let s = p.reduce((a, b) => a + b, 0);
+  if (!s) { p = p.map(() => 1); s = p.length; }
+  const passo = Number.isInteger(total) && total >= p.length * 10 ? 1 : 0.01;
+  const v = p.map((x) => centavos(Math.round((total * x) / s / passo) * passo));
+  const dif = centavos(total - v.reduce((a, b) => a + b, 0));
+  const iMaior = v.indexOf(Math.max(...v));
+  v[iMaior] = centavos(v[iMaior] + dif);
+  return v;
+}
+// Grava o total de cada item como valor unitário (total ÷ quantidade) e acerta a diferença num item de qtd. 1.
+// Valores redondos: o unitário também fica em reais inteiros (ex.: R$ 65,00/m², não R$ 64,99).
+function aplicarTotais(itens, tots, campo) {
+  const redondo = tots.every((t) => Number.isInteger(t));
+  itens.forEach((it, i) => {
+    if (!(Number(it.qtd) > 0)) it.qtd = 1;
+    const u = tots[i] / Number(it.qtd);
+    it[campo] = redondo && u >= 10 ? Math.round(u) : centavos(u);
+  });
+  const dif = centavos(tots.reduce((a, b) => a + b, 0) - itens.reduce((s, it) => s + totalItem(it, campo), 0));
+  if (dif) {
+    const um = itens.filter((it) => Number(it.qtd) === 1).sort((a, b) => b[campo] - a[campo])[0];
+    if (um) um[campo] = centavos(um[campo] + dif);
+  }
+}
+// Com valor global combinado: os itens que você não mexeu à mão se ajustam para o total fechar
+function fecharNoGlobal(o) {
+  const g = Number(o.valorGlobal) || 0;
+  if (!g) return;
+  const campo = campoValor(o);
+  const livres = o.itens.filter((it) => !it.fixo);
+  if (!livres.length) return;
+  const resto = centavos(g - o.itens.filter((it) => it.fixo).reduce((s, it) => s + totalItem(it, campo), 0));
+  if (resto < 0) return;
+  aplicarTotais(livres, repartir(resto, livres.map((it) => totalItem(it, campo))), campo);
+}
+
+// Modelos iniciais (só a divisão em %, sem preços). Ficam no aparelho e sincronizam pelo Drive;
+// dá para editar, apagar e criar novos. Os ids fixos evitam duplicar entre o celular e o PC.
+const MODELOS_PADRAO = [
+  {
+    id: 'modelo-telhado-ripas', nome: 'Reforma de telhado cerâmico (troca de ripas)',
+    itens: [
+      ['Mobilização, andaime e proteção dos ambientes', 5],
+      ['Retirada e recolocação das telhas cerâmicas (com reposição das quebradas)', 25],
+      ['Substituição das ripas', 30],
+      ['Substituição pontual de caibros e terças', 15],
+      ['Recolocação e emboçamento da cumeeira', 5],
+      ['Transporte do entulho até a caçamba e limpeza', 5],
+      ['Engenharia, acompanhamento técnico e ART', 15]
+    ],
+    escopo: 'Reforma do telhado cerâmico, com retirada das telhas, substituição das ripas, substituição pontual de peças do madeiramento comprometidas e recolocação das telhas, conforme constatado na vistoria técnica.',
+    observacoes: 'Não incluso: reparo de forro e pintura interna, revisão de calhas e condutores, locação de caçamba.'
+  },
+  {
+    id: 'modelo-telhado-completo', nome: 'Troca completa de telhado',
+    itens: [
+      ['Mobilização, andaime e proteção dos ambientes', 5],
+      ['Retirada das telhas e do madeiramento existente', 12],
+      ['Estrutura de madeira nova (tesouras, terças, caibros e ripas)', 30],
+      ['Instalação das telhas novas', 25],
+      ['Cumeeiras, rufos e arremates', 8],
+      ['Transporte do entulho até a caçamba e limpeza', 5],
+      ['Engenharia, acompanhamento técnico e ART', 15]
+    ],
+    escopo: 'Troca completa do telhado, com retirada das telhas e do madeiramento existente, execução de estrutura de madeira nova, instalação das telhas novas e arremates (cumeeiras e rufos).',
+    observacoes: 'Não incluso: forro, pintura, calhas e condutores, locação de caçamba.'
+  },
+  {
+    id: 'modelo-calhas', nome: 'Troca de calhas e condutores',
+    itens: [
+      ['Mobilização e andaime', 10],
+      ['Retirada das calhas e condutores existentes', 15],
+      ['Instalação das calhas novas', 40],
+      ['Instalação dos condutores', 20],
+      ['Vedação, teste de escoamento e limpeza', 5],
+      ['Engenharia, acompanhamento técnico e ART', 10]
+    ],
+    escopo: 'Substituição das calhas e condutores, com retirada dos existentes, instalação dos novos, vedação das emendas e teste de escoamento.',
+    observacoes: ''
+  },
+  {
+    id: 'modelo-banheiro', nome: 'Reforma de banheiro',
+    itens: [
+      ['Demolição de revestimentos e louças, com retirada do entulho', 12],
+      ['Instalações hidráulicas e de esgoto', 18],
+      ['Impermeabilização do piso e do box', 10],
+      ['Contrapiso e regularização', 8],
+      ['Assentamento de revestimento de piso e parede', 30],
+      ['Instalação de louças, metais e acessórios', 8],
+      ['Limpeza final', 4],
+      ['Engenharia, acompanhamento técnico e ART', 10]
+    ],
+    escopo: 'Reforma do banheiro, com demolição dos revestimentos, revisão das instalações hidráulicas e de esgoto, impermeabilização, novo revestimento de piso e parede e instalação de louças e metais.',
+    observacoes: 'Não incluso: forro, pintura, elétrica e móveis.'
+  },
+  {
+    id: 'modelo-piso', nome: 'Assentamento de piso / porcelanato',
+    itens: [
+      ['Retirada do piso existente e do entulho', 15],
+      ['Regularização do contrapiso', 15],
+      ['Assentamento do piso', 55],
+      ['Rejuntamento e limpeza', 10],
+      ['Acompanhamento técnico', 5]
+    ],
+    escopo: 'Troca do piso, com retirada do revestimento existente, regularização do contrapiso, assentamento do novo piso, rejuntamento e limpeza.',
+    observacoes: 'Não incluso: rodapés, pintura e móveis.'
+  },
+  {
+    id: 'modelo-pintura', nome: 'Pintura',
+    itens: [
+      ['Proteção dos ambientes e preparação', 10],
+      ['Raspagem, lixamento e correções', 20],
+      ['Emassamento', 20],
+      ['Pintura acrílica (2 demãos)', 40],
+      ['Limpeza final', 5],
+      ['Acompanhamento técnico', 5]
+    ],
+    escopo: 'Pintura dos ambientes, com proteção, preparação das superfícies (raspagem, lixamento e correções), emassamento e pintura em duas demãos.',
+    observacoes: ''
+  },
+  {
+    id: 'modelo-regularizacao', nome: 'Regularização de imóvel',
+    itens: [
+      ['Levantamento técnico no imóvel', 20],
+      ['Elaboração das plantas e documentos técnicos', 45],
+      ['Protocolo e acompanhamento junto à Prefeitura', 25],
+      ['Emissão de ART', 10]
+    ],
+    escopo: 'Regularização do imóvel junto à Prefeitura, com levantamento técnico, elaboração das plantas e documentos técnicos, protocolo e acompanhamento do processo.',
+    observacoes: 'Não incluso: taxas e emolumentos da Prefeitura e do cartório.'
+  }
+];
+async function garantirModelos() {
+  const lapides = new Set((await todos('excluidos')).map((e) => e.id));
+  const desde = '2026-11-23T00:00:00.000Z';   // data antiga: qualquer edição sua vale mais que o modelo inicial
+  for (const m of MODELOS_PADRAO) {
+    if (lapides.has(m.id) || (await pegar('modelos', m.id))) continue;
+    await tx('modelos', 'readwrite', (s) => s.put({
+      ...m, itens: m.itens.map(([descricao, peso]) => ({ descricao, peso })), criadoEm: desde, atualizadoEm: desde
+    }));
+  }
+}
+const somaPesos = (m) => Math.round((m.itens || []).reduce((s, x) => s + (Number(x.peso) || 0), 0) * 10) / 10;
+const porNome = (a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR');
+
 // ---------------------------------------------------------------- lista
 async function telaOrcamentos(main) {
-  const os = (await todos('orcamentos')).sort((a, b) => (b.atualizadoEm || '').localeCompare(a.atualizadoEm || ''));
+  await garantirModelos();
+  const nModelos = (await todos('modelos')).length;
+  const os =(await todos('orcamentos')).sort((a, b) => (b.atualizadoEm || '').localeCompare(a.atualizadoEm || ''));
   const abertos = os.filter((o) => !['Aprovado', 'Recusado'].includes(o.situacao));
   const aprovados = os.filter((o) => o.situacao === 'Aprovado');
   const recusados = os.filter((o) => o.situacao === 'Recusado');
@@ -73,6 +231,9 @@ async function telaOrcamentos(main) {
     </nav>
     <h1>Orçamentos</h1>
     <p class="sub">Vistoria técnica, orçamento e proposta. Aprovou? Vira obra com um toque.</p>
+    <a class="item lanc" href="#/modelos" style="margin-bottom:.4rem"><span><strong>Modelos de orçamento</strong>
+      <small>Itens prontos por tipo de serviço, com a % de cada um para repartir o valor global</small></span>
+      <span class="valor"><b>${nModelos}</b></span></a>
     <h2>Em aberto (${abertos.length})</h2>
     ${abertos.length ? lista(abertos) : '<p class="vazio">Nenhum orçamento em aberto. Toque em <b>+ Nova vistoria</b> quando for ver uma obra.</p>'}
     ${aprovados.length ? `<details class="grupo"><summary>Aprovados (${aprovados.length})</summary>${lista(aprovados)}</details>` : ''}
@@ -100,6 +261,8 @@ async function telaOrcamento(main, id) {
   const o = await pegar('orcamentos', id);
   if (!o) { location.hash = '#/orcamentos'; return; }
   o.itens = o.itens || [];
+  await garantirModelos();
+  const modelos = (await todos('modelos')).sort(porNome);
   const obra = o.obraId ? await pegar('obras', o.obraId) : null;
   const txt = (nome, titulo, dica = '', tipo = 'text', extra = '') => `
     <label for="o-${nome}">${titulo}</label>
@@ -147,8 +310,26 @@ async function telaOrcamento(main, id) {
         <label><input type="radio" name="fornecimento" value="mo" ${o.fornecimento === 'mo' ? 'checked' : ''}><span>Só mão de obra</span></label>
       </div>
       <p class="sub" id="dica-forn" style="margin:.5rem 0 0"></p>
+      <div class="card rapido">
+        <b>Preencher rápido: valor global</b>
+        <label for="r-modelo">Modelo</label>
+        <select id="r-modelo">
+          <option value="">Repartir entre os itens abaixo</option>
+          ${modelos.map((m) => `<option value="${esc(m.id)}">${esc(m.nome)}</option>`).join('')}
+        </select>
+        <label for="r-global">Valor global (R$)</label>
+        <input id="r-global" inputmode="decimal" placeholder="Ex.: 18.000,00" value="${valorCampo(o.valorGlobal)}">
+        <div class="botoes lado">
+          <button class="btn" id="b-repartir" type="button">Repartir o valor</button>
+          <a class="btn sec" href="#/modelos">Editar modelos</a>
+        </div>
+        <p class="sub" id="dica-rapido" style="margin:.5rem 0 0"></p>
+      </div>
       <div id="itens"></div>
-      <div class="botoes"><button class="btn sec" id="b-add-item" type="button">+ Adicionar item</button></div>
+      <div class="botoes lado">
+        <button class="btn sec" id="b-add-item" type="button">+ Adicionar item</button>
+        <button class="btn sec" id="b-salvar-modelo" type="button">Salvar como modelo</button>
+      </div>
       <div class="card totais" id="totais" style="margin:1rem 0 0"></div>
 
       ${area('prazo', 'Prazo de execução', 'Ex.: 15 dias úteis após o início')}
@@ -200,7 +381,7 @@ async function telaOrcamento(main, id) {
     $('#itens').querySelectorAll('[data-rem]').forEach((b) => {
       b.onclick = async () => {
         if (!confirm(`Remover o item ${Number(b.dataset.rem) + 1}?`)) return;
-        await salvarAgora(); o.itens.splice(Number(b.dataset.rem), 1); await salvarAgora(true); desenharItens();
+        await salvarAgora(); o.itens.splice(Number(b.dataset.rem), 1); fecharNoGlobal(o); await salvarAgora(true); desenharItens();
       };
     });
     mostrarTotais();
@@ -214,20 +395,36 @@ async function telaOrcamento(main, id) {
     return it;
   });
   const mostrarTotais = () => {
+    const comGlobal = Number(o.valorGlobal) > 0;
     o.itens.forEach((it, i) => {
       const s = document.querySelector(`[data-sub="${i}"]`); if (!s) return;
       const q = Number(it.qtd) || 0;
-      s.textContent = ehMo()
+      s.textContent = (ehMo()
         ? `Mão de obra: ${moeda(q * (it.valorMo || 0))} · Material estimado: ${moeda(q * (it.valorMat || 0))}`
-        : `Subtotal: ${moeda(q * (it.valor || 0))}`;
+        : `Subtotal: ${moeda(q * (it.valor || 0))}`) + (comGlobal && it.fixo ? ' · valor fixado por você' : '');
     });
     const t = totaisOrc(o), custo = Number(o.custoEstimado) || 0;
+    const dif = comGlobal ? centavos(o.valorGlobal - (ehMo() ? t.mo : t.contrato)) : 0;
+    const global = comGlobal ? `<div class="linha-total interno"><span>Valor global combinado</span><b class="${dif ? 'alerta' : 'positivo'}">${moeda(o.valorGlobal)}${dif > 0 ? ` · faltam ${moeda(dif)}` : dif < 0 ? ` · passou ${moeda(-dif)}` : ' ✓'}</b></div>` : '';
+    $('#dica-rapido').innerHTML = comGlobal
+      ? `Valor global <b>${moeda(o.valorGlobal)}</b>: se você mudar o valor de um item, os outros se ajustam para o total continuar fechando. Para repartir tudo de novo, toque em "Repartir o valor".`
+      : 'Escolha um modelo (ou use os itens abaixo), digite o valor global e toque em "Repartir o valor". Cada item fica como verba (1 vb); preencha a quantidade só se quiser mostrar, por exemplo, os m².';
     const margem = custo && t.contrato ? `<div class="linha-total interno"><span>Margem estimada (só você vê)</span><b class="${t.contrato - custo < 0 ? 'alerta' : 'positivo'}">${moeda(t.contrato - custo)} · ${Math.round(((t.contrato - custo) / t.contrato) * 100)}%</b></div>` : '';
     $('#totais').innerHTML = ehMo() ? `
       <div class="linha-total"><span>Mão de obra (valor da proposta)</span><b>${moeda(t.mo)}</b></div>
       <div class="linha-total"><span>Material estimado (cliente compra)</span><b>${moeda(t.mat)}</b></div>
-      <div class="linha-total"><span>Total estimado para o cliente</span><b>${moeda(t.mo + t.mat)}</b></div>${margem}` : `
-      <div class="linha-total"><span>Valor total (material + mão de obra)</span><b>${moeda(t.contrato)}</b></div>${margem}`;
+      <div class="linha-total"><span>Total estimado para o cliente</span><b>${moeda(t.mo + t.mat)}</b></div>${global}${margem}` : `
+      <div class="linha-total"><span>Valor total (material + mão de obra)</span><b>${moeda(t.contrato)}</b></div>${global}${margem}`;
+  };
+  // Atualiza só os campos de valor (sem redesenhar, para não tirar o cursor de onde você está)
+  const atualizarValores = () => {
+    const campo = campoValor(o);
+    document.querySelectorAll('.item-orc').forEach((el) => {
+      const it = o.itens[Number(el.dataset.i)]; if (!it) return;
+      const inp = el.querySelector(ehMo() ? '[name="it-mo"]' : '[name="it-valor"]');
+      if (inp) inp.value = valorCampo(it[campo]);
+    });
+    mostrarTotais();
   };
 
   // ----- salvamento automático
@@ -274,6 +471,78 @@ async function telaOrcamento(main, id) {
     o.itens.push({ id: novoId(), descricao: '', un: '', qtd: 1, valor: 0, valorMo: 0, valorMat: 0 });
     await salvarAgora(true); desenharItens();
     const novos = document.querySelectorAll('[name="it-desc"]'); novos[novos.length - 1].focus();
+  };
+
+  // ----- valor global: modelo (ou itens atuais) + valor -> reparte nos itens
+  $('#b-repartir').onclick = async () => {
+    const global = lerValor($('#r-global').value);
+    if (!(global > 0)) { aviso('Digite o valor global', 3000); $('#r-global').focus(); return; }
+    await salvarAgora();
+    const campo = campoValor(o);
+    const m = modelos.find((x) => x.id === $('#r-modelo').value);
+    if (m) {
+      const temItens = o.itens.some((it) => (it.descricao || '').trim() || Number(it[campo]) > 0);
+      if (temItens && !confirm(`Trocar os itens atuais pelos ${m.itens.length} itens do modelo "${m.nome}"?`)) return;
+      o.itens = m.itens.map((x) => ({ id: novoId(), descricao: x.descricao, un: 'vb', qtd: 1, valor: 0, valorMo: 0, valorMat: 0 }));
+      aplicarTotais(o.itens, repartir(global, m.itens.map((x) => x.peso)), campo);
+      // Textos do modelo entram nos campos vazios ou que vieram de outro modelo (o que você escreveu à mão fica)
+      const deModelo = new Set(modelos.flatMap((x) => [x.nome, x.escopo, x.observacoes]).filter(Boolean).map((s) => s.trim()));
+      const preencher = (campoForm, valor) => {
+        const el = $('#o-' + campoForm);
+        if (!el) return;
+        if (deModelo.has(el.value.trim())) el.value = valor || '';
+        else if (!el.value.trim() && valor) el.value = valor;
+      };
+      preencher('servico', m.nome); preencher('necessidade', m.escopo); preencher('observacoes', m.observacoes);
+      $('#t-orc').textContent = $('#o-servico').value || 'Nova vistoria';
+    } else {
+      const its = o.itens.filter((it) => (it.descricao || '').trim());
+      if (!its.length) { aviso('Escolha um modelo ou escreva os itens primeiro', 3500); return; }
+      o.itens = its;
+      aplicarTotais(its, repartir(global, its.map((it) => totalItem(it, campo))), campo);
+    }
+    o.itens.forEach((it) => { delete it.fixo; });
+    o.valorGlobal = global;
+    await salvarAgora(true); desenharItens();
+    aviso('Valor repartido nos itens. Confira e ajuste se quiser.', 3500);
+  };
+  // Mexeu no valor de um item com global combinado: esse item fica fixo e os outros se ajustam.
+  // Mexeu na quantidade: o total do item continua o mesmo (o valor unitário é recalculado).
+  $('#itens').addEventListener('change', (e) => {
+    const nome = e.target.name;
+    if (!['it-valor', 'it-mo', 'it-qtd'].includes(nome) || !(Number(o.valorGlobal) > 0)) return;
+    const i = Number(e.target.closest('.item-orc').dataset.i);
+    const campo = campoValor(o);
+    const antes = o.itens[i] ? totalItem(o.itens[i], campo) : 0;
+    o.itens = lerItens();
+    const it = o.itens[i];
+    if (nome === 'it-qtd') { if (Number(it.qtd) > 0 && antes) it[campo] = centavos(antes / Number(it.qtd)); }
+    else it.fixo = true;
+    fecharNoGlobal(o);
+    atualizarValores();
+    salvarAgora(true);
+  });
+  $('#b-salvar-modelo').onclick = async () => {
+    await salvarAgora();
+    const campo = campoValor(o);
+    const its = o.itens.filter((it) => (it.descricao || '').trim());
+    if (!its.length) { aviso('Escreva os itens antes de salvar como modelo', 3500); return; }
+    const nome = prompt('Nome do modelo:', o.servico || '');
+    if (!nome || !nome.trim()) return;
+    const tots = its.map((it) => totalItem(it, campo)), soma = tots.reduce((a, b) => a + b, 0);
+    // % com uma casa decimal; o maior item fica com o arredondamento, para fechar 100% certinho
+    const pesos = its.map((it, k) => (soma ? Math.round((tots[k] / soma) * 1000) / 10 : Math.round(1000 / its.length) / 10));
+    const iMaior = pesos.indexOf(Math.max(...pesos));
+    pesos[iMaior] = Math.round((pesos[iMaior] + 100 - pesos.reduce((a, b) => a + b, 0)) * 10) / 10;
+    const m = {
+      id: novoId(), nome: nome.trim(),
+      itens: its.map((it, k) => ({ descricao: it.descricao.trim(), peso: pesos[k] })),
+      escopo: o.necessidade || '', observacoes: o.observacoes || '', criadoEm: agora(), atualizadoEm: agora()
+    };
+    await gravar('modelos', m);
+    modelos.push(m); modelos.sort(porNome);
+    $('#r-modelo').insertAdjacentHTML('beforeend', `<option value="${esc(m.id)}">${esc(m.nome)}</option>`);
+    aviso(`Modelo "${m.nome}" salvo (${soma ? 'com a % de cada item' : 'em partes iguais'})`, 3500);
   };
 
   desenharItens();
@@ -482,4 +751,102 @@ async function gerarPropostaCompleta(id) {
   ].join('\n'));
   P.assinatura(hoje());
   return P.finalizar(`Proposta-${o.numero || ''}-${slug(o.cliente || o.servico)}.pdf`);
+}
+
+// ---------------------------------------------------------------- modelos de orçamento
+async function telaModelos(main) {
+  await garantirModelos();
+  const ms = (await todos('modelos')).sort(porNome);
+  main.innerHTML = `
+    <a class="voltar" href="#/orcamentos">‹ Orçamentos</a>
+    <h1>Modelos de orçamento</h1>
+    <p class="sub">Cada modelo tem os itens de um tipo de serviço e a % de cada um. No orçamento, você escolhe o modelo,
+      digita o valor global e o app reparte. Também dá para salvar um orçamento pronto como modelo.</p>
+    ${ms.length ? `<ul class="lista">${ms.map((m) => `<li><a class="item lanc" href="#/modelo/${esc(m.id)}">
+      <span><strong>${esc(m.nome)}</strong><small>${(m.itens || []).length} itens</small></span>
+      <span class="valor"><small class="${somaPesos(m) === 100 ? '' : 'alerta'}">${somaPesos(m).toLocaleString('pt-BR')}%</small></span>
+    </a></li>`).join('')}</ul>` : '<p class="vazio">Nenhum modelo. Toque em <b>+ Novo modelo</b>.</p>'}
+    <button class="btn flutuante" id="b-novo-modelo" type="button">+ Novo modelo</button>`;
+  $('#b-novo-modelo').onclick = async () => {
+    const m = { id: novoId(), nome: '', itens: [{ descricao: '', peso: 100 }], escopo: '', observacoes: '', criadoEm: agora(), atualizadoEm: agora() };
+    await gravar('modelos', m);
+    location.hash = '#/modelo/' + m.id;
+  };
+}
+
+async function telaModelo(main, id) {
+  const m = await pegar('modelos', id);
+  if (!m) { location.hash = '#/modelos'; return; }
+  m.itens = m.itens || [];
+  main.innerHTML = `
+    <a class="voltar" href="#/modelos">‹ Modelos</a>
+    <h1 id="t-modelo">${esc(m.nome || 'Novo modelo')}</h1>
+    <form id="f-modelo" class="card" autocomplete="off">
+      <label for="m-nome">Nome do modelo (vira o título do serviço)</label>
+      <input id="m-nome" name="nome" value="${esc(m.nome)}" placeholder="Ex.: Troca de telhado">
+      <h2>Itens e % do valor global</h2>
+      <div id="m-itens"></div>
+      <p class="sub" id="m-soma" style="margin:.6rem 0 0"></p>
+      <div class="botoes"><button class="btn sec" id="b-m-add" type="button">+ Adicionar item</button></div>
+      <label for="m-escopo">Escopo padrão (entra no orçamento se o escopo estiver vazio)</label>
+      <textarea id="m-escopo" name="escopo">${esc(m.escopo)}</textarea>
+      <label for="m-obs">Observações padrão (ex.: o que não está incluso)</label>
+      <textarea id="m-obs" name="observacoes">${esc(m.observacoes)}</textarea>
+      <p class="salvo" id="salvo"></p>
+    </form>
+    <div class="botoes"><button class="btn perigo" id="b-excluir-modelo" type="button">Excluir modelo</button></div>`;
+
+  const desenhar = () => {
+    $('#m-itens').innerHTML = m.itens.map((x, i) => `
+      <div class="linha-peso" data-i="${i}">
+        <textarea name="md-desc" rows="2" placeholder="Descrição do serviço" aria-label="Descrição do item ${i + 1}">${esc(x.descricao)}</textarea>
+        <input name="md-peso" inputmode="decimal" value="${x.peso ? String(x.peso).replace('.', ',') : ''}" placeholder="%" aria-label="% do item ${i + 1}">
+        ${m.itens.length > 1 ? `<button type="button" class="link-perigo" data-rem="${i}" aria-label="Remover item ${i + 1}">✕</button>` : '<span></span>'}
+      </div>`).join('');
+    // Campo da descrição cresce conforme o texto (para ler a descrição inteira no celular)
+    $('#m-itens').querySelectorAll('textarea').forEach((t) => {
+      const ajustar = () => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 2 + 'px'; };
+      t.addEventListener('input', ajustar); ajustar();
+    });
+    $('#m-itens').querySelectorAll('[data-rem]').forEach((b) => {
+      b.onclick = async () => { ler(); m.itens.splice(Number(b.dataset.rem), 1); await salvar(); desenhar(); };
+    });
+    mostrarSoma();
+  };
+  const ler = () => {
+    m.itens = [...document.querySelectorAll('.linha-peso')].map((el) => ({
+      descricao: el.querySelector('[name="md-desc"]').value, peso: lerValor(el.querySelector('[name="md-peso"]').value)
+    }));
+    const d = Object.fromEntries(new FormData($('#f-modelo')));
+    m.nome = d.nome.trim(); m.escopo = d.escopo; m.observacoes = d.observacoes;
+  };
+  const mostrarSoma = () => {
+    const s = somaPesos(m);
+    $('#m-soma').innerHTML = s === 100
+      ? 'Soma: <b class="positivo">100%</b> ✓'
+      : `Soma: <b class="alerta">${s.toLocaleString('pt-BR')}%</b>. Não precisa fechar 100%: o app reparte na proporção. Mas fechando 100% fica mais fácil de conferir.`;
+  };
+  let timer;
+  const salvar = async () => {
+    clearTimeout(timer); _salvarPendente = null;
+    ler(); m.atualizadoEm = agora();
+    await gravar('modelos', m);
+    $('#t-modelo').textContent = m.nome || 'Novo modelo';
+    mostrarSoma();
+    $('#salvo').textContent = 'Salvo no aparelho ✓ ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  };
+  const agendar = () => { clearTimeout(timer); _salvarPendente = salvar; timer = setTimeout(salvar, 700); };
+  $('#f-modelo').addEventListener('input', agendar);
+  $('#f-modelo').addEventListener('submit', (e) => e.preventDefault());
+  $('#b-m-add').onclick = async () => {
+    ler(); m.itens.push({ descricao: '', peso: 0 }); await salvar(); desenhar();
+    const ds = document.querySelectorAll('[name="md-desc"]'); ds[ds.length - 1].focus();
+  };
+  $('#b-excluir-modelo').onclick = async () => {
+    if (!confirm(`Excluir o modelo "${m.nome || 'sem nome'}"? Os orçamentos feitos com ele não mudam.`)) return;
+    clearTimeout(timer); _salvarPendente = null;
+    await excluir('modelos', m.id);
+    aviso('Modelo excluído'); location.hash = '#/modelos';
+  };
+  desenhar();
 }
