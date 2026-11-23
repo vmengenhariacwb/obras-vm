@@ -152,6 +152,8 @@ details.grupo > summary { cursor: pointer; color: var(--titulo); font-weight: 60
 .linha-total b { color: var(--titulo); white-space: nowrap; }
 .linha-total:last-child:not(.interno) b, .linha-total.interno { border-top: 1px solid var(--borda); padding-top: .45rem; }
 #f-orc h2 { margin-top: 1.4rem; }
+.na-proposta { display: flex; align-items: center; gap: .4rem; margin: 0; padding: .45rem .6rem; border-top: 1px solid var(--borda); font-size: .8rem; color: var(--titulo); cursor: pointer; }
+.na-proposta input { width: 18px; height: 18px; min-height: 0; accent-color: var(--destaque); }
 .segmento { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--fundo); border: 1px solid var(--borda); border-radius: 10px; }
 .segmento label { margin: 0; }
 .segmento input { position: absolute; opacity: 0; width: 1px; height: 1px; }

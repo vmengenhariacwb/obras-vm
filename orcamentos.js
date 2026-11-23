@@ -8,6 +8,34 @@ const FORNECIMENTO = {
   global: 'Material e mão de obra',
   mo: 'Só mão de obra (material por conta do cliente)'
 };
+// Mesmos dados e regras da proposta oficial da V&M (skill proposta-vm)
+const CONTATO = {
+  whatsapp: '(41) 99804-2520', email: 'contato.vmengenharia@hotmail.com', instagram: '@vm.eng.curitiba',
+  endereco: 'Rua Augusto Zibarth, 936, Uberaba, Curitiba/PR', site: 'vmengenhariacwb.github.io'
+};
+const PAGAMENTO_PADRAO = '30% de entrada e saldo conforme o andamento dos serviços.';
+const FRASES_PROIBIDAS = [
+  [/equipe de arquitetos/i, 'equipe de arquitetos'], [/engenharia e arquitetura/i, 'engenharia e arquitetura'],
+  [/\barquitetos?\b/i, 'arquiteto(s)'], [/\bRRT\b/i, 'RRT'], [/\bCAU\b/i, 'CAU'], [/baldr/i, 'BALDRA'], [/made with gamma/i, 'Made with Gamma']
+];
+// Confere os textos que vão para o cliente; devolve a lista de problemas (vazia = tudo certo)
+function conferirOrcamento(o, completa) {
+  const textos = [o.servico, o.necessidade, o.prazo, o.pagamento, o.observacoes, ...(o.itens || []).map((it) => it.descricao)].join('\n');
+  const prob = FRASES_PROIBIDAS.filter(([re]) => re.test(textos)).map(([, f]) => `tirar a expressão "${f}" (a V&M é engenharia civil e emite ART)`);
+  if (/\[[^\]]*\]|a definir/i.test(textos)) prob.push('há texto por preencher ("[...]" ou "a definir")');
+  if (completa) {
+    if (!(o.cliente || '').trim()) prob.push('preencher o nome do cliente');
+    if (!(o.servico || '').trim()) prob.push('preencher o serviço (título)');
+    if (!(o.necessidade || '').trim()) prob.push('preencher a necessidade / escopo');
+    if (!(o.prazo || '').trim()) prob.push('preencher o prazo de execução');
+    (o.itens || []).forEach((it, i) => {
+      const v = o.fornecimento === 'mo' ? it.valorMo : it.valor;
+      if ((it.descricao || '').trim() && !(Number(v) > 0)) prob.push(`item ${i + 1} está sem valor`);
+      if (!(it.descricao || '').trim() && Number(v) > 0) prob.push(`item ${i + 1} está sem descrição`);
+    });
+  }
+  return prob;
+}
 const centavos = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const qtdTexto = (n) => (Number(n) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
 
@@ -58,7 +86,7 @@ async function telaOrcamentos(main) {
       id: novoId(), numero: `${ano}-${String(Math.max(0, ...doAno) + 1).padStart(3, '0')}`, situacao: 'Vistoria',
       data: hoje(), cliente: '', telefone: '', local: '', servico: '', necessidade: '', medidas: '',
       fornecimento: 'global', itens: [{ id: novoId(), descricao: '', un: '', qtd: 1, valor: 0, valorMo: 0, valorMat: 0 }],
-      prazo: '', pagamento: '', validadeDias: 15, observacoes: '', custoEstimado: 0, retornarEm: '',
+      prazo: '', pagamento: '', validadeDias: 30, observacoes: '', custoEstimado: 0, retornarEm: '',
       criadoEm: agora(), atualizadoEm: agora()
     };
     await gravar('orcamentos', o);
@@ -124,9 +152,9 @@ async function telaOrcamento(main, id) {
       <div class="card totais" id="totais" style="margin:1rem 0 0"></div>
 
       ${area('prazo', 'Prazo de execução', 'Ex.: 15 dias úteis após o início')}
-      ${area('pagamento', 'Forma de pagamento', 'Ex.: 40% na assinatura, 60% na conclusão · Pix')}
+      ${area('pagamento', 'Forma de pagamento', 'Em branco = padrão: 30% de entrada e saldo conforme o andamento')}
       <div class="duas">
-        <div>${txt('validadeDias', 'Validade da proposta (dias)', '15', 'number', 'min="1" inputmode="numeric"')}</div>
+        <div>${txt('validadeDias', 'Validade da proposta (dias)', '30', 'number', 'min="1" inputmode="numeric"')}</div>
         <div>${txt('custoEstimado', 'Seu custo estimado (R$)', '0,00', 'text', 'inputmode="decimal"')}</div>
       </div>
       <p class="sub" style="margin:.3rem 0 0">O custo estimado é só para você (não vai no PDF): no "Só mão de obra", coloque só o que você vai gastar (mão de obra), sem o material do cliente. Ao virar obra, ele vira o "custo previsto".</p>
@@ -134,6 +162,12 @@ async function telaOrcamento(main, id) {
       <p class="salvo" id="salvo2"></p>
     </form>
 
+    <h2>3. Enviar ao cliente</h2>
+    <div class="segmento" role="radiogroup" aria-label="Modelo do PDF">
+      <label><input type="radio" name="modelo-pdf" value="completa" checked><span>Proposta completa</span></label>
+      <label><input type="radio" name="modelo-pdf" value="simples"><span>PDF simples</span></label>
+    </div>
+    <p class="sub" id="dica-modelo" style="margin:.5rem 0 0"></p>
     <div class="botoes lado">
       <button class="btn zap" id="b-orc-enviar" type="button">Gerar PDF e enviar</button>
       <button class="btn sec" id="b-orc-baixar" type="button">Baixar PDF</button>
@@ -245,9 +279,40 @@ async function telaOrcamento(main, id) {
   desenharItens();
   if (!obra) await mostrarFotos({ id: o.id }, { id: o.id });
 
-  const gerador = async () => { await salvarAgora(); return gerarPdfOrcamento(o.id); };
-  $('#b-orc-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Orçamento V&M Engenharia');
-  $('#b-orc-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Orçamento V&M Engenharia');
+  // Fotos: cada uma ganha "Na proposta" (marcada = entra na proposta completa)
+  const marcarFotos = async () => {
+    const box = $('#fotos'); if (!box) return;
+    for (const b of box.querySelectorAll('[data-remover]')) {
+      if (b.parentElement.querySelector('.na-proposta')) continue;
+      const f = await pegar('fotos', b.dataset.remover); if (!f) continue;
+      const l = document.createElement('label'); l.className = 'na-proposta';
+      l.innerHTML = `<input type="checkbox" ${f.foraDaProposta ? '' : 'checked'}> Na proposta`;
+      l.querySelector('input').onchange = async (e) => {
+        const x = await pegar('fotos', f.id); if (!x) return;
+        x.foraDaProposta = !e.target.checked; x.atualizadoEm = agora(); await gravar('fotos', x);
+      };
+      b.before(l);
+    }
+  };
+  if ($('#fotos')) { new MutationObserver(marcarFotos).observe($('#fotos'), { childList: true }); marcarFotos(); }
+
+  const modelo = () => (document.querySelector('input[name="modelo-pdf"]:checked') || {}).value;
+  const dicaModelo = () => {
+    $('#dica-modelo').textContent = modelo() === 'completa'
+      ? 'Capa, apresentação da V&M, escopo, fotos da vistoria marcadas "Na proposta", valores, condições, próximos passos e contato.'
+      : 'Uma ou duas páginas: dados, escopo, valores e condições.';
+  };
+  document.querySelectorAll('input[name="modelo-pdf"]').forEach((r) => { r.onchange = dicaModelo; });
+  dicaModelo();
+  const gerador = async () => {
+    await salvarAgora();
+    const completa = modelo() === 'completa';
+    const prob = conferirOrcamento(o, completa);
+    if (prob.length) throw new Error('antes de gerar, ' + prob.join('; '));
+    return completa ? gerarPropostaCompleta(o.id) : gerarPdfOrcamento(o.id);
+  };
+  $('#b-orc-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Proposta V&M Engenharia');
+  $('#b-orc-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Proposta V&M Engenharia');
   if ($('#b-virar-obra')) $('#b-virar-obra').onclick = async () => { await salvarAgora(); transformarEmObra(o); };
   $('#b-excluir-orc').onclick = async () => {
     const fotos = await porIndice('fotos', 'visitaId', o.id);
@@ -287,24 +352,16 @@ async function transformarEmObra(o) {
   location.hash = '#/obra/' + obra.id;
 }
 
-// ---------------------------------------------------------------- PDF do orçamento (para o cliente)
-async function gerarPdfOrcamento(id) {
-  const o = await pegar('orcamentos', id);
-  const t = totaisOrc(o);
-  const mo = o.fornecimento === 'mo';
+// ---------------------------------------------------------------- PDFs para o cliente
+// Partes comuns do PDF simples e da proposta completa
+function prepararPdfOrc(o) {
   const its = (o.itens || []).filter((it) => (it.descricao || '').trim() || it.valor || it.valorMo || it.valorMat);
   if (!its.length) throw new Error('inclua pelo menos um item no orçamento');
-  const dias = Number(o.validadeDias) || 15;
-  const validade = `${dias} dias (até ${dataBR(maisDias(dias))})`;
+  const dias = Number(o.validadeDias) || 30;
+  return { its, t: totaisOrc(o), mo: o.fornecimento === 'mo', validade: `${dias} dias (até ${dataBR(maisDias(dias))})` };
+}
 
-  const P = await criarPdf('ORÇAMENTO', `nº ${o.numero || ''}  ·  ${o.servico || ''}  ·  ${dataBR(hoje())}`);
-  P.quadro([
-    ['Cliente', o.cliente], ['Local', o.local], ['Serviço', o.servico],
-    ['Vistoria técnica', dataBR(o.data)], ['Fornecimento', mo ? 'Mão de obra (material por conta do cliente)' : 'Material e mão de obra'],
-    ['Data do orçamento', dataBR(hoje())], ['Validade', validade]
-  ]);
-  if ((o.necessidade || '').trim()) { P.titulo('Escopo do serviço'); P.paragrafo(o.necessidade); }
-
+function pdfValores(P, o, its, t, mo) {
   const cols = (rotUnit, rotTotal) => [
     { t: 'Item', w: 11 }, { t: 'Descrição', w: 83 }, { t: 'Unid.', w: 14 }, { t: 'Qtd.', w: 16, a: 'right' },
     { t: rotUnit, w: 28, a: 'right' }, { t: rotTotal, w: 28, a: 'right', negrito: true }
@@ -316,26 +373,113 @@ async function gerarPdfOrcamento(id) {
     P.titulo('Serviços e valores');
     P.tabela(cols('Valor unit.', 'Total'), linhas(its, 'valor'));
     P.y -= 2; P.total('VALOR TOTAL (MATERIAL E MÃO DE OBRA)', moeda(t.contrato));
-  } else {
-    P.titulo('Mão de obra');
-    P.tabela(cols('Valor unit.', 'Total'), linhas(its, 'valorMo'));
-    P.y -= 2; P.total('VALOR DA MÃO DE OBRA', moeda(t.mo));
-    const mats = its.filter((it) => Number(it.valorMat) > 0);
-    if (mats.length) {
-      P.y += 3;
-      P.titulo('Estimativa de materiais (por conta do cliente)');
-      P.tabela(cols('Ref. unit.', 'Estimado'), linhas(mats, 'valorMat'));
-      P.y -= 2; P.total('MATERIAL ESTIMADO (REFERÊNCIA)', moeda(t.mat), false);
-      P.paragrafo('Valores de referência, estimados na data deste orçamento. A compra dos materiais é feita pelo cliente e os preços podem variar conforme o fornecedor e a data da compra. Este valor não faz parte do valor da proposta.', '', 9);
-    }
+    return;
   }
+  P.titulo('Mão de obra');
+  P.tabela(cols('Valor unit.', 'Total'), linhas(its, 'valorMo'));
+  P.y -= 2; P.total('VALOR DA MÃO DE OBRA', moeda(t.mo));
+  const mats = its.filter((it) => Number(it.valorMat) > 0);
+  if (mats.length) {
+    P.y += 3;
+    P.titulo('Estimativa de materiais (por conta do cliente)');
+    P.tabela(cols('Ref. unit.', 'Estimado'), linhas(mats, 'valorMat'));
+    P.y -= 2; P.total('MATERIAL ESTIMADO (REFERÊNCIA)', moeda(t.mat), false);
+    P.paragrafo('Valores de referência, estimados na data deste orçamento. A compra dos materiais é feita pelo cliente e os preços podem variar conforme o fornecedor e a data da compra. Este valor não faz parte do valor da proposta.', '', 9);
+  }
+}
 
+function pdfCondicoes(P, o, validade, mo) {
   P.titulo('Condições');
   P.campo('Prazo de execução', o.prazo);
-  P.campo('Forma de pagamento', o.pagamento);
+  P.campo('Forma de pagamento', (o.pagamento || '').trim() || PAGAMENTO_PADRAO);
   P.campo('Validade da proposta', validade);
-  P.campo('Responsabilidade técnica', 'Emissão de ART conforme o serviço contratado.');
-  P.campo('Observações', o.observacoes);
+  P.campo('Responsabilidade técnica', 'Emissão de ART conforme o serviço contratado, assumida mediante contratação formal.');
+  P.campo('Garantia', `Limitada à mão de obra executada, em prazo definido conforme o tipo de serviço.${mo ? ' Os materiais comprados pelo cliente seguem a garantia do fabricante.' : ''}`);
+  P.campo('Não incluso / observações', o.observacoes);
+}
+
+// 1) PDF simples (1 a 2 páginas)
+async function gerarPdfOrcamento(id) {
+  const o = await pegar('orcamentos', id);
+  const { its, t, mo, validade } = prepararPdfOrc(o);
+  const P = await criarPdf('ORÇAMENTO', `nº ${o.numero || ''}  ·  ${o.servico || ''}  ·  ${dataBR(hoje())}`);
+  P.quadro([
+    ['Cliente', o.cliente], ['Local', o.local], ['Serviço', o.servico],
+    ['Vistoria técnica', dataBR(o.data)], ['Fornecimento', mo ? 'Mão de obra (material por conta do cliente)' : 'Material e mão de obra'],
+    ['Data do orçamento', dataBR(hoje())], ['Validade', validade]
+  ]);
+  if ((o.necessidade || '').trim()) { P.titulo('Escopo do serviço'); P.paragrafo(o.necessidade); }
+  pdfValores(P, o, its, t, mo);
+  pdfCondicoes(P, o, validade, mo);
   P.assinatura(hoje());
   return P.finalizar(`Orcamento-${o.numero || ''}-${slug(o.cliente || o.servico)}.pdf`);
+}
+
+// 2) Proposta completa: capa, apresentação, escopo, fotos da vistoria, valores, condições, próximos passos e contato
+async function gerarPropostaCompleta(id) {
+  const o = await pegar('orcamentos', id);
+  const { its, t, mo, validade } = prepararPdfOrc(o);
+  const fotos = (await porIndice('fotos', 'visitaId', o.id)).filter((f) => !f.foraDaProposta).sort((a, b) => a.ordem - b.ordem);
+
+  const P = await criarPdf('PROPOSTA TÉCNICA E COMERCIAL', `nº ${o.numero || ''}  ·  ${o.servico || ''}  ·  ${o.cliente || ''}`);
+  const { doc, W, H, M } = P;
+
+  // ----- capa (página 1): faixa azul-marinho com o logo e o título; dados embaixo
+  doc.setFillColor(255, 255, 255); doc.rect(0, 0, W, H, 'F');
+  doc.setFillColor(...COR.NAVY); doc.rect(0, 0, W, 196, 'F');
+  doc.addImage(await logoDataUrl(), 'PNG', (W - 46) / 2, 36, 46, 47.6, 'logo', 'FAST');
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(184, 199, 214);
+  doc.text('ENGENHARIA CIVIL  ·  CURITIBA/PR', W / 2, 96, { align: 'center' });
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(21); doc.setTextColor(241, 245, 249);
+  doc.text('PROPOSTA TÉCNICA E COMERCIAL', W / 2, 124, { align: 'center' });
+  doc.setFontSize(15); doc.setTextColor(...COR.AZUL);
+  let y = 137;
+  for (const l of doc.splitTextToSize(pdfTxt(o.servico), 160).slice(0, 3)) { doc.text(l, W / 2, y, { align: 'center' }); y += 7; }
+  doc.setDrawColor(...COR.AZUL); doc.setLineWidth(0.8); doc.line(W / 2 - 14, y, W / 2 + 14, y);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5); doc.setTextColor(184, 199, 214);
+  doc.text(pdfTxt(`Proposta nº ${o.numero || ''}  ·  ${dataExtenso(hoje())}`), W / 2, y + 12, { align: 'center' });
+
+  const bloco = (x, yy, rot, val) => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...COR.CINZA); doc.text(rot, x, yy);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(11.5); doc.setTextColor(...COR.NAVY);
+    doc.splitTextToSize(pdfTxt(val), 82).slice(0, 2).forEach((l, i) => doc.text(l, x, yy + 6 + i * 5.2));
+  };
+  bloco(M, 214, 'PARA', o.cliente);
+  bloco(110, 214, 'RESPONSÁVEL TÉCNICO', `${EMPRESA.resp}, Engenheiro Civil · ${EMPRESA.crea}`);
+  bloco(M, 240, 'LOCAL DA OBRA', o.local || '-');
+  bloco(110, 240, 'VALIDADE DA PROPOSTA', validade);
+  doc.addPage(); P.cabecalho();
+
+  // ----- conteúdo
+  P.titulo('Apresentação');
+  P.paragrafo(`A ${EMPRESA.nome} é uma empresa de engenharia civil de Curitiba/PR. Atua em obras residenciais, reformas, calhas e telhados, projetos, regularização de imóveis, laudos técnicos e acompanhamento de obras. Os serviços são conduzidos pelo ${EMPRESA.resp}, engenheiro civil (${EMPRESA.crea}).`);
+  P.paragrafo(`Esta proposta foi preparada para ${o.cliente}${o.local ? `, para o imóvel em ${o.local}` : ''}, a partir da vistoria técnica${o.data ? ` realizada em ${dataBR(o.data)}` : ''}.`);
+
+  P.titulo('Escopo do serviço');
+  P.paragrafo(o.necessidade);
+  P.campo('Fornecimento', mo ? 'Mão de obra. Os materiais são comprados pelo cliente; a estimativa de materiais vem como referência.' : 'Material e mão de obra.');
+
+  if (fotos.length) {
+    P.titulo(`Registro da vistoria técnica (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`);
+    await P.fotos(fotos, { colunas: fotos.length === 1 ? 2 : 3, maxH: fotos.length === 1 ? 68 : 44, reduzir: 1000 });
+    P.y += 2;
+  }
+
+  pdfValores(P, o, its, t, mo);
+  pdfCondicoes(P, o, validade, mo);
+
+  P.titulo('Próximos passos');
+  P.paragrafo([
+    '1. Aprovação da proposta, por WhatsApp ou e-mail.',
+    '2. Alinhamento da data de início e formalização da contratação.',
+    '3. Emissão da ART e início dos serviços, com acompanhamento técnico do engenheiro responsável.'
+  ].join('\n'));
+
+  P.titulo('Contato');
+  P.paragrafo([
+    `WhatsApp: ${CONTATO.whatsapp}`, `E-mail: ${CONTATO.email}`, `Instagram: ${CONTATO.instagram}`,
+    `Site: ${CONTATO.site}`, `Endereço: ${CONTATO.endereco}`
+  ].join('\n'));
+  P.assinatura(hoje());
+  return P.finalizar(`Proposta-${o.numero || ''}-${slug(o.cliente || o.servico)}.pdf`);
 }
