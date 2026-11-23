@@ -393,6 +393,29 @@ async function telaOrcamento(main, id) {
     </div>
     <div class="botoes"><button class="btn sec" id="b-copiar-proposta" type="button">Copiar para a proposta no Canva</button></div>
     <p class="sub" style="margin:.4rem 0 0">Copia os dados deste orçamento num texto pronto. Cole no Claude (no PC) e peça a proposta oficial no Canva.</p>
+
+    <div id="box-contrato" ${o.situacao === 'Aprovado' ? '' : 'hidden'}>
+      <h2>4. Contrato</h2>
+      <form id="f-orc3" class="card" autocomplete="off">
+        <p class="sub" style="margin-top:0">Complete o que o orçamento não tem. O resto (serviços, valores, materiais, prazo) já vem do orçamento.</p>
+        ${txt('ctNome', 'Nome completo do contratante', 'Como no documento')}
+        <div class="duas">
+          <div>${txt('ctDoc', 'CPF ou CNPJ', '000.000.000-00', 'text', 'inputmode="numeric"')}</div>
+          <div>${txt('ctEmail', 'E-mail do contratante', '', 'email')}</div>
+        </div>
+        ${txt('ctEndereco', 'Endereço do contratante', 'Rua, nº, bairro, cidade/UF, CEP')}
+        ${txt('ctEnderecoObra', 'Endereço da obra', 'Em branco = o mesmo do contratante')}
+        <div class="duas">
+          <div>${txt('ctInicio', 'Início previsto', '', 'date')}</div>
+          <div>${txt('ctArt', 'ART (se já tiver)', 'Nº da ART')}</div>
+        </div>
+        ${area('ctPagamento', 'Pagamento combinado no contrato', 'Em branco = o da proposta. Ex.: 30% na assinatura, 40% na metade, 30% na entrega')}
+        ${area('ctObs', 'Combinados extras para o contrato', 'Ex.: cliente fornece água e luz; horário de trabalho 8h–17h; entulho por conta da V&M')}
+        <p class="salvo" id="salvo3"></p>
+      </form>
+      <div class="botoes"><button class="btn sec" id="b-copiar-contrato" type="button">Copiar para o contrato</button></div>
+      <p class="sub" style="margin:.4rem 0 0">Copia tudo num texto pronto. Cole no Claude (no PC) e peça o contrato em Word.</p>
+    </div>
     ${obra ? '' : '<div class="botoes"><button class="btn" id="b-virar-obra" type="button">Aprovado: transformar em obra</button></div>'}
     <div class="botoes"><button class="btn perigo" id="b-excluir-orc" type="button">Excluir orçamento</button></div>`;
 
@@ -514,7 +537,8 @@ async function telaOrcamento(main, id) {
   let timer;
   const salvarAgora = async (semLer) => {
     clearTimeout(timer); _salvarPendente = null;
-    const d = { ...Object.fromEntries(new FormData($('#f-orc'))), ...Object.fromEntries(new FormData($('#f-orc2'))) };
+    const d = { ...Object.fromEntries(new FormData($('#f-orc'))), ...Object.fromEntries(new FormData($('#f-orc2'))),
+      ...Object.fromEntries(new FormData($('#f-orc3'))) };
     for (const k of Object.keys(d)) if (k.startsWith('it-') || k.startsWith('mt-')) delete d[k];
     d.validadeDias = parseInt(d.validadeDias, 10) || 15;
     d.custoEstimado = lerValor(d.custoEstimado);
@@ -524,10 +548,10 @@ async function telaOrcamento(main, id) {
     await gravar('orcamentos', o);
     mostrarTotais();
     const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    ['#salvo', '#salvo2'].forEach((s) => { if ($(s)) $(s).textContent = 'Salvo no aparelho ✓ ' + hora; });
+    ['#salvo', '#salvo2', '#salvo3'].forEach((s) => { if ($(s)) $(s).textContent = 'Salvo no aparelho ✓ ' + hora; });
   };
   const agendar = () => { clearTimeout(timer); _salvarPendente = salvarAgora; timer = setTimeout(salvarAgora, 700); };
-  for (const f of ['#f-orc', '#f-orc2']) {
+  for (const f of ['#f-orc', '#f-orc2', '#f-orc3']) {
     $(f).addEventListener('input', agendar);
     $(f).addEventListener('change', agendar);
     $(f).addEventListener('submit', (e) => e.preventDefault());
@@ -536,6 +560,7 @@ async function telaOrcamento(main, id) {
   $('#o-situacao').addEventListener('change', (e) => {
     const s = e.target.value;
     $('#box-retorno').hidden = s !== 'Enviado';
+    $('#box-contrato').hidden = s !== 'Aprovado';
     if (s === 'Enviado' && !$('#o-retornarEm').value) $('#o-retornarEm').value = maisDias(3);
     $('#st-orc').textContent = s; $('#st-orc').className = 'st st-' + slug(s);
   });
@@ -719,10 +744,19 @@ async function telaOrcamento(main, id) {
   $('#b-orc-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Proposta V&M Engenharia');
   $('#b-copiar-proposta').onclick = async () => {
     await salvarAgora();
-    const texto = await textoParaProposta(o);
+    copiarTexto(await textoParaProposta(o), 'Copiado! Cole no Claude e peça a proposta no Canva.');
+  };
+  $('#b-copiar-contrato').onclick = async () => {
+    await salvarAgora();
+    const falta = [!(o.ctNome || o.cliente || '').trim() && 'nome do contratante', !(o.ctDoc || '').trim() && 'CPF/CNPJ',
+      !(o.ctEndereco || '').trim() && 'endereço'].filter(Boolean);
+    if (falta.length && !confirm(`Ainda falta: ${falta.join(', ')}.\n\nCopiar mesmo assim? (o Claude deixa esses campos em branco no contrato)`)) return;
+    copiarTexto(await textoParaContrato(o), 'Copiado! Cole no Claude e peça o contrato.');
+  };
+  const copiarTexto = async (texto, msg) => {
     let copiou = false;
     try { await navigator.clipboard.writeText(texto); copiou = true; } catch (e) { /* sem permissão: mostra o texto */ }
-    if (copiou) { aviso('Copiado! Cole no Claude e peça a proposta no Canva.', 4500); return; }
+    if (copiou) { aviso(msg, 4500); return; }
     // Sem acesso à área de transferência: mostra o texto selecionado para copiar na mão
     const caixa = document.createElement('div'); caixa.className = 'ver-imagem';
     caixa.innerHTML = `<p style="color:#fff;margin:0">Copie o texto abaixo (segure em cima › Selecionar tudo › Copiar):</p>
@@ -809,6 +843,32 @@ async function textoParaProposta(o) {
     '',
     fotos.length ? `Fotos: ${fotos.length} foto(s) marcada(s) "Na proposta" no app (mando separadas se precisar).` : 'Fotos: nenhuma marcada para a proposta.');
   return partes.filter((p) => p !== null).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+// ---------------------------------------------------------------- texto para o contrato (Word, feito no Claude)
+async function textoParaContrato(o) {
+  const linha = (rot, v) => `${rot}: ${String(v || '').trim() || '(em branco)'}`;
+  const proposta = (await textoParaProposta(o)).split('\n').slice(1).join('\n')
+    .replace(/^(Validade|Pagamento): .*\n?/gm, '').replace(/^Fotos: .*$/m, '').trim();
+  return [
+    `Contrato a partir do orçamento nº ${o.numero || ''} do app Obras V&M (orçamento aprovado):`,
+    '',
+    'Contratante:',
+    linha('Nome completo', o.ctNome || o.cliente),
+    linha('CPF/CNPJ', o.ctDoc),
+    linha('Endereço', o.ctEndereco),
+    linha('Telefone', o.telefone),
+    linha('E-mail', o.ctEmail),
+    '',
+    linha('Endereço da obra', o.ctEnderecoObra || (o.ctEndereco ? 'o mesmo do contratante' : o.local)),
+    linha('Início previsto', o.ctInicio ? dataBR(o.ctInicio) : ''),
+    linha('ART', o.ctArt),
+    `Pagamento combinado no contrato: ${(o.ctPagamento || '').trim() || (o.pagamento || '').trim() || PAGAMENTO_PADRAO}`,
+    (o.ctObs || '').trim() ? `Combinados extras:\n${o.ctObs.trim()}` : null,
+    '',
+    'Dados do orçamento aprovado:',
+    proposta
+  ].filter((p) => p !== null).join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
 function prepararPdfOrc(o) {
