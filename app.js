@@ -314,6 +314,19 @@ async function telaObra(main, id, aba) {
           <strong>Visita nº ${numero.get(v.id)} · ${dataBR(v.data)}</strong>
           <small>${n} foto(s)${resumo ? ' · ' + esc(resumo) : ''}</small></a></li>`;
       }).join('')}</ul>` : '<p class="vazio">Nenhuma visita registrada.</p>'}
+      ${visitas.length ? `
+      <details class="card" style="margin-top:1rem">
+        <summary style="cursor:pointer;color:var(--titulo);font-weight:600">Relatório da obra (PDF para o cliente)</summary>
+        <p class="sub" style="margin:.6rem 0 0">Junta as visitas do período num PDF só, com atividades, orientações e fotos. Não inclui nada do financeiro.</p>
+        <div class="duas">
+          <div><label for="r-de">De</label><input id="r-de" type="date" value="${esc(visitas[0].data)}"></div>
+          <div><label for="r-ate">Até</label><input id="r-ate" type="date" value="${esc(visitas[visitas.length - 1].data > hoje() ? visitas[visitas.length - 1].data : hoje())}"></div>
+        </div>
+        <div class="botoes lado">
+          <button class="btn zap" id="b-rel-enviar" type="button">Gerar e enviar</button>
+          <button class="btn sec" id="b-rel-baixar" type="button">Baixar PDF</button>
+        </div>
+      </details>` : ''}
       <div class="botoes"><button class="btn perigo" id="b-excluir-obra" type="button">Excluir obra</button></div>
       <button class="btn flutuante" id="b-nova-visita" type="button">+ Nova visita (hoje)</button>`;
 
@@ -324,6 +337,15 @@ async function telaObra(main, id, aba) {
     location.hash = '#/visita/' + v.id;
   };
   $('#b-excluir-obra').onclick = excluirObra;
+  if ($('#b-rel-enviar')) {
+    const gerador = () => {
+      const de = $('#r-de').value, ate = $('#r-ate').value;
+      if (de && ate && de > ate) throw new Error('a data "De" está depois da data "Até"');
+      return gerarRelatorioObra(obra.id, de, ate);
+    };
+    $('#b-rel-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Relatório da obra');
+    $('#b-rel-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Relatório da obra');
+  }
 }
 
 async function telaVisita(main, id) {
@@ -379,28 +401,8 @@ async function telaVisita(main, id) {
 
   await mostrarFotos(v, obra);
 
-  const gerar = async (modo, botao) => {
-    if (_salvarPendente) await _salvarPendente();
-    const textoOriginal = botao.textContent;
-    botao.disabled = true; botao.textContent = 'Gerando PDF...';
-    try {
-      const { blob, nome } = await gerarPdf(v.id);
-      if (modo === 'baixar') { baixar(blob, nome); aviso('PDF baixado'); return; }
-      const r = await compartilharOuBaixar(blob, nome, 'application/pdf', 'Relatório de visita');
-      if (r === 'baixado') aviso('PDF baixado (este aparelho não abriu o Compartilhar)');
-      if (r === 'precisa-toque') {
-        // O celular só deixa abrir o Compartilhar logo após um toque: o PDF já está pronto, falta um toque.
-        botao.disabled = false; botao.textContent = 'PDF pronto: toque para enviar';
-        botao.onclick = async () => { await compartilharOuBaixar(blob, nome, 'application/pdf', 'Relatório de visita'); botao.textContent = textoOriginal; botao.onclick = () => gerar('enviar', botao); };
-        return;
-      }
-    } catch (e) {
-      console.error(e); aviso('Não foi possível gerar o PDF: ' + e.message, 5000);
-    }
-    botao.disabled = false; botao.textContent = textoOriginal;
-  };
-  $('#b-enviar').onclick = (e) => gerar('enviar', e.currentTarget);
-  $('#b-baixar').onclick = (e) => gerar('baixar', e.currentTarget);
+  $('#b-enviar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'enviar', 'Relatório de visita');
+  $('#b-baixar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'baixar', 'Relatório de visita');
 
   $('#b-excluir-visita').onclick = async () => {
     const fotos = await porIndice('fotos', 'visitaId', v.id);
@@ -532,11 +534,13 @@ async function abaFinanceiro(box, obra, excluirObra) {
       <a class="btn sec" href="#/novo-lancamento/${obra.id}/Receber">+ Recebimento</a>
       <button class="btn sec" id="b-excel-obra" type="button">Exportar planilha</button>
     </div>
+    <div class="botoes"><button class="btn sec" id="b-rel-fin" type="button">Relatório financeiro (PDF · uso interno)</button></div>
     <div class="botoes"><button class="btn perigo" id="b-excluir-obra" type="button">Excluir obra</button></div>
     <a class="btn flutuante" href="#/novo-lancamento/${obra.id}/Pagar">+ Nova despesa</a>`;
 
   $('#filtro-fin').onchange = (e) => { _filtroFin = e.target.value; abaFinanceiro(box, obra, excluirObra); };
   $('#b-excel-obra').onclick = (e) => exportarExcel(obra.id, e.currentTarget);
+  $('#b-rel-fin').onclick = (e) => acaoPdf(e.currentTarget, () => gerarRelatorioFinanceiro(obra.id), ehComputador() ? 'baixar' : 'enviar', 'Relatório financeiro');
   $('#b-excluir-obra').onclick = excluirObra;
 }
 
@@ -749,114 +753,320 @@ async function logoDataUrl() {
   return _logo;
 }
 
-async function gerarPdf(visitaId) {
+// Peças comuns dos PDFs: os três relatórios usam o mesmo cabeçalho, quadro, títulos, fotos, tabela e rodapé.
+const COR = { NAVY: [11, 31, 51], AZUL: [59, 158, 255], TEXTO: [40, 52, 66], CINZA: [110, 124, 140], FUNDO: [241, 245, 249], LINHA: [214, 222, 230], VERDE: [21, 128, 61], VERMELHO: [190, 40, 40] };
+// A fonte padrão do PDF não tem alguns símbolos (sinal de menos tipográfico, travessões)
+const pdfTxt = (s) => String(s ?? '').replace(/[−–—]/g, '-');
+
+async function reduzirImagem(blob, max) {
+  const img = await createImageBitmap(blob);
+  const r = Math.min(1, max / Math.max(img.width, img.height));
+  const c = document.createElement('canvas'); c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); if (img.close) img.close();
+  return c.toDataURL('image/jpeg', 0.72);
+}
+
+async function criarPdf(tituloTopo, linhaTopo) {
   if (!window.jspdf) throw new Error('o gerador de PDF ainda não carregou. Abra o app uma vez com internet.');
+  const logo = await logoDataUrl();
+  const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', compress: true });
+  const P = { doc, W: 210, H: 297, M: 15, y: 0 };
+  P.LARG = P.W - 2 * P.M; P.FIM = P.H - 20;
+  const { M, W, H, LARG } = P;
+
+  P.cabecalho = () => {
+    doc.setFillColor(...COR.NAVY); doc.rect(0, 0, W, 30, 'F');
+    doc.addImage(logo, 'PNG', M, 6, 17.4, 18, 'logo', 'FAST');
+    doc.setTextColor(241, 245, 249); doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+    doc.text(tituloTopo, M + 23, 13.5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(184, 199, 214);
+    doc.text(doc.splitTextToSize(pdfTxt(linhaTopo), W - 2 * M - 23)[0], M + 23, 19.5);
+    doc.text(`${EMPRESA.nome}  ·  ${EMPRESA.resp}  ·  ${EMPRESA.crea}`, M + 23, 24.5);
+    P.y = 39;
+  };
+  P.cabe = (h) => { if (P.y + h > P.FIM) { doc.addPage(); P.cabecalho(); return true; } return false; };
+
+  P.titulo = (t) => {
+    P.cabe(16);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.NAVY);
+    doc.text(t.toUpperCase(), M, P.y);
+    doc.setDrawColor(...COR.AZUL); doc.setLineWidth(0.6); doc.line(M, P.y + 1.8, M + 18, P.y + 1.8);
+    P.y += 8;
+  };
+  // Faixa clara com borda azul (usada para cada visita no relatório da obra)
+  P.subtitulo = (t, detalhe) => {
+    const alt = detalhe ? 11.5 : 7;
+    P.cabe(alt + 12);
+    doc.setFillColor(...COR.FUNDO); doc.rect(M, P.y - 4.6, LARG, alt, 'F');
+    doc.setDrawColor(...COR.AZUL); doc.setLineWidth(0.9); doc.line(M, P.y - 4.6, M, P.y - 4.6 + alt);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...COR.NAVY); doc.text(pdfTxt(t), M + 3, P.y);
+    if (detalhe) {
+      P.y += 4.8; doc.setFont('helvetica', 'normal'); doc.setFontSize(8.8); doc.setTextColor(...COR.CINZA);
+      doc.text(doc.splitTextToSize(pdfTxt(detalhe), LARG - 6)[0], M + 3, P.y);
+    }
+    P.y += 8;
+  };
+  P.paragrafo = (txt, vazio = 'Sem registro.', tam = 10.5) => {
+    const t = pdfTxt(txt).trim();
+    doc.setFont('helvetica', t ? 'normal' : 'italic'); doc.setFontSize(tam); doc.setTextColor(...(t ? COR.TEXTO : COR.CINZA));
+    const lh = tam * 0.495;
+    for (const linha of doc.splitTextToSize(t || vazio, LARG)) { P.cabe(lh); doc.text(linha, M, P.y); P.y += lh; }
+    P.y += 4;
+  };
+  // "Rótulo" em negrito e o texto embaixo (só aparece se tiver texto)
+  P.campo = (rotulo, txt) => {
+    const t = pdfTxt(txt).trim(); if (!t) return false;
+    P.cabe(10);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.NAVY); doc.text(rotulo, M, P.y); P.y += 4.6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.TEXTO);
+    for (const l of doc.splitTextToSize(t, LARG)) { P.cabe(4.8); doc.text(l, M, P.y); P.y += 4.8; }
+    P.y += 2.5;
+    return true;
+  };
+  P.quadro = (linhas) => {
+    linhas = linhas.filter(([, val]) => val);
+    const alt = linhas.length * 6 + 5;
+    P.cabe(alt);
+    doc.setFillColor(...COR.FUNDO); doc.setDrawColor(...COR.LINHA); doc.setLineWidth(0.2);
+    doc.roundedRect(M, P.y - 5, LARG, alt, 2, 2, 'FD');
+    doc.setFontSize(10);
+    for (const [rot, val] of linhas) {
+      doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.CINZA); doc.text(rot, M + 4, P.y);
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.TEXTO); doc.text(doc.splitTextToSize(pdfTxt(val), LARG - 50)[0], M + 45, P.y);
+      P.y += 6;
+    }
+    P.y += 8;
+  };
+  // Fotos em grade (2 por linha na visita; 3 por linha, reduzidas, no relatório da obra)
+  P.fotos = async (fotos, { colunas = 2, maxH = 68, inicio = 1, reduzir = 0 } = {}) => {
+    const tres = colunas > 2;
+    const GAP = tres ? 4 : 6, COL = (LARG - GAP * (colunas - 1)) / colunas, fs = tres ? 8 : 9, lh = tres ? 3.6 : 4.2;
+    for (let i = 0; i < fotos.length; i += colunas) {
+      const grupo = fotos.slice(i, i + colunas).map((f, k) => {
+        const h = Math.min(maxH, COL * f.altura / f.largura);
+        doc.setFontSize(fs);
+        return { f, h, w: h * f.largura / f.altura, leg: doc.splitTextToSize(pdfTxt(`Foto ${inicio + i + k}${f.legenda ? ' - ' + f.legenda.trim() : ''}`), COL) };
+      });
+      const alt = maxH + Math.max(...grupo.map((p) => p.leg.length)) * lh + (tres ? 5 : 7);
+      P.cabe(alt);
+      for (const [k, p] of grupo.entries()) {
+        const x0 = M + k * (COL + GAP);
+        doc.setFillColor(...COR.FUNDO); doc.rect(x0, P.y, COL, maxH, 'F');
+        const img = reduzir ? await reduzirImagem(p.f.blob, reduzir) : await blobParaDataUrl(p.f.blob);
+        doc.addImage(img, 'JPEG', x0 + (COL - p.w) / 2, P.y + (maxH - p.h) / 2, p.w, p.h, p.f.id, 'FAST');
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(fs); doc.setTextColor(...COR.TEXTO);
+        doc.text(p.leg, x0, P.y + maxH + (tres ? 3.8 : 4.5));
+      }
+      P.y += alt;
+    }
+  };
+  // Tabela simples: colunas [{t, w, a:'right'}]; cor(i, j) pode devolver uma cor para a célula
+  P.tabela = (cols, linhas, cor) => {
+    const fs = 8.6, lh = 3.8, pad = 1.6;
+    const posX = (x, c) => (c.a === 'right' ? x + c.w - pad : x + pad);
+    const cab = () => {
+      P.cabe(10);
+      doc.setFillColor(...COR.NAVY); doc.rect(M, P.y - 4.2, LARG, 6.2, 'F');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(fs); doc.setTextColor(255, 255, 255);
+      let x = M; for (const c of cols) { doc.text(c.t, posX(x, c), P.y, c.a === 'right' ? { align: 'right' } : undefined); x += c.w; }
+      P.y += 5.4;
+    };
+    cab();
+    linhas.forEach((ln, i) => {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(fs);
+      const partes = ln.map((v, j) => doc.splitTextToSize(pdfTxt(v), cols[j].w - 2 * pad).slice(0, 2));
+      const h = Math.max(...partes.map((p) => p.length)) * lh + 1.8;
+      if (P.y + h > P.FIM) { doc.addPage(); P.cabecalho(); cab(); }
+      if (i % 2) { doc.setFillColor(...COR.FUNDO); doc.rect(M, P.y - 3.3, LARG, h, 'F'); }
+      let x = M;
+      partes.forEach((p, j) => {
+        const c = cols[j];
+        doc.setFont('helvetica', c.negrito ? 'bold' : 'normal');
+        doc.setTextColor(...((cor && cor(i, j)) || COR.TEXTO));
+        doc.text(p, posX(x, c), P.y, c.a === 'right' ? { align: 'right' } : undefined);
+        x += c.w;
+      });
+      P.y += h;
+    });
+    P.y += 5;
+  };
+  P.assinatura = (dataIso) => {
+    P.cabe(38); P.y += 10;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...COR.TEXTO);
+    doc.text(`Curitiba, ${dataExtenso(dataIso)}.`, M, P.y); P.y += 20;
+    doc.setDrawColor(...COR.CINZA); doc.setLineWidth(0.3); doc.line(M, P.y, M + 80, P.y); P.y += 5;
+    doc.setFont('helvetica', 'bold'); doc.text(EMPRESA.resp, M, P.y); P.y += 5;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.CINZA);
+    doc.text(`Engenheiro Civil  ·  ${EMPRESA.crea}`, M, P.y);
+  };
+  P.finalizar = (nome, aviso) => {
+    const total = doc.getNumberOfPages();
+    for (let p = 1; p <= total; p++) {
+      doc.setPage(p);
+      doc.setDrawColor(...COR.LINHA); doc.setLineWidth(0.2); doc.line(M, H - 13, W - M, H - 13);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.CINZA);
+      doc.text(`${EMPRESA.nome}  ·  CNPJ ${EMPRESA.cnpj}  ·  ${EMPRESA.cidade}${aviso ? '  ·  ' + aviso : ''}`, M, H - 8.5);
+      doc.text(`Página ${p} de ${total}`, W - M, H - 8.5, { align: 'right' });
+    }
+    return { blob: doc.output('blob'), nome };
+  };
+
+  P.cabecalho();
+  return P;
+}
+
+const textoClima = (v) => [v.climaManha && `manhã: ${v.climaManha}`, v.climaTarde && `tarde: ${v.climaTarde}`].filter(Boolean).join('  ·  ');
+
+// 1) Relatório de UMA visita (para o cliente)
+async function gerarPdf(visitaId) {
   const v = await pegar('visitas', visitaId);
   const obra = await pegar('obras', v.obraId);
   const visitas = (await porIndice('visitas', 'obraId', obra.id)).sort(porData);
   const num = visitas.findIndex((x) => x.id === v.id) + 1;
   const fotos = (await porIndice('fotos', 'visitaId', v.id)).sort((a, b) => a.ordem - b.ordem);
-  const logo = await logoDataUrl();
 
-  const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', compress: true });
-  const W = 210, H = 297, M = 15, LARG = W - 2 * M, FIM = H - 20;
-  const NAVY = [11, 31, 51], AZUL = [59, 158, 255], TEXTO = [40, 52, 66], CINZA = [110, 124, 140];
-  let y = 0;
-
-  const cabecalho = () => {
-    doc.setFillColor(...NAVY); doc.rect(0, 0, W, 30, 'F');
-    doc.addImage(logo, 'PNG', M, 6, 17.4, 18, 'logo', 'FAST');
-    doc.setTextColor(241, 245, 249); doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-    doc.text('RELATÓRIO DE VISITA TÉCNICA', M + 23, 13.5);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(184, 199, 214);
-    doc.text(`Diário de obra nº ${num}  ·  ${dataBR(v.data)}`, M + 23, 19.5);
-    doc.text(`${EMPRESA.nome}  ·  ${EMPRESA.resp}  ·  ${EMPRESA.crea}`, M + 23, 24.5);
-    y = 39;
-  };
-  const cabe = (h) => { if (y + h > FIM) { doc.addPage(); cabecalho(); } };
-  const titulo = (t) => {
-    cabe(16);
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...NAVY);
-    doc.text(t.toUpperCase(), M, y);
-    doc.setDrawColor(...AZUL); doc.setLineWidth(0.6); doc.line(M, y + 1.8, M + 18, y + 1.8);
-    y += 8;
-  };
-  const paragrafo = (txt, vazio = 'Sem registro.') => {
-    const t = (txt || '').trim();
-    doc.setFont('helvetica', t ? 'normal' : 'italic'); doc.setFontSize(10.5); doc.setTextColor(...(t ? TEXTO : CINZA));
-    for (const linha of doc.splitTextToSize(t || vazio, LARG)) { cabe(5.2); doc.text(linha, M, y); y += 5.2; }
-    y += 4;
-  };
-
-  cabecalho();
-
-  // Quadro com os dados da obra e da visita
-  const clima = [v.climaManha && `manhã: ${v.climaManha}`, v.climaTarde && `tarde: ${v.climaTarde}`].filter(Boolean).join('  ·  ');
-  const linhas = [
+  const P = await criarPdf('RELATÓRIO DE VISITA TÉCNICA', `Diário de obra nº ${num}  ·  ${dataBR(v.data)}`);
+  P.quadro([
     ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
-    ['Data da visita', dataBR(v.data)], ['Clima', clima], ['Condição do canteiro', v.condicao]
-  ].filter(([, val]) => val);
-  const alturaQuadro = linhas.length * 6 + 5;
-  doc.setFillColor(241, 245, 249); doc.setDrawColor(214, 222, 230); doc.setLineWidth(0.2);
-  doc.roundedRect(M, y - 5, LARG, alturaQuadro, 2, 2, 'FD');
-  doc.setFontSize(10);
-  for (const [rot, val] of linhas) {
-    doc.setFont('helvetica', 'bold'); doc.setTextColor(...CINZA); doc.text(rot, M + 4, y);
-    doc.setFont('helvetica', 'normal'); doc.setTextColor(...TEXTO); doc.text(doc.splitTextToSize(String(val), LARG - 50)[0], M + 45, y);
-    y += 6;
-  }
-  y += 8;
-
-  titulo('Equipe presente'); paragrafo(v.equipe);
-  titulo('Atividades em execução'); paragrafo(v.atividades);
-  titulo('Ocorrências'); paragrafo(v.ocorrencias);
-  titulo('Orientações registradas'); paragrafo(v.orientacoes, 'Nenhuma orientação registrada nesta visita.');
-
-  // Relatório fotográfico: 2 fotos por linha
+    ['Data da visita', dataBR(v.data)], ['Clima', textoClima(v)], ['Condição do canteiro', v.condicao]
+  ]);
+  P.titulo('Equipe presente'); P.paragrafo(v.equipe);
+  P.titulo('Atividades em execução'); P.paragrafo(v.atividades);
+  P.titulo('Ocorrências'); P.paragrafo(v.ocorrencias);
+  P.titulo('Orientações registradas'); P.paragrafo(v.orientacoes, 'Nenhuma orientação registrada nesta visita.');
   if (fotos.length) {
-    titulo(`Relatório fotográfico (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`);
-    const GAP = 6, COL = (LARG - GAP) / 2, MAXH = 68;
-    for (let i = 0; i < fotos.length; i += 2) {
-      const par = fotos.slice(i, i + 2).map((f, k) => {
-        const h = Math.min(MAXH, COL * f.altura / f.largura);
-        const w = h * f.largura / f.altura;
-        doc.setFontSize(9);
-        const leg = doc.splitTextToSize(`Foto ${i + k + 1}${f.legenda ? ' - ' + f.legenda.trim() : ''}`, COL);
-        return { f, w, h, leg };
-      });
-      const alturaLinha = MAXH + Math.max(...par.map((p) => p.leg.length)) * 4.2 + 7;
-      cabe(alturaLinha);
-      for (const [k, p] of par.entries()) {
-        const x0 = M + k * (COL + GAP);
-        doc.setFillColor(241, 245, 249); doc.rect(x0, y, COL, MAXH, 'F');
-        doc.addImage(await blobParaDataUrl(p.f.blob), 'JPEG', x0 + (COL - p.w) / 2, y + (MAXH - p.h) / 2, p.w, p.h, p.f.id, 'FAST');
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...TEXTO);
-        doc.text(p.leg, x0, y + MAXH + 4.5);
+    P.titulo(`Relatório fotográfico (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`);
+    await P.fotos(fotos);
+  }
+  P.assinatura(v.data);
+  return P.finalizar(`Relatorio-visita-${num}-${slug(obra.nome)}-${v.data}.pdf`);
+}
+
+// 2) Relatório da OBRA num período (para o cliente; sem nada do financeiro)
+async function gerarRelatorioObra(obraId, de, ate) {
+  const obra = await pegar('obras', obraId);
+  const todas = (await porIndice('visitas', 'obraId', obra.id)).sort(porData);
+  const numero = new Map(todas.map((v, i) => [v.id, i + 1]));
+  const vs = todas.filter((v) => (!de || v.data >= de) && (!ate || v.data <= ate));
+  if (!vs.length) throw new Error('nenhuma visita nesse período');
+  const fotosDe = new Map();
+  let totalFotos = 0;
+  for (const v of vs) { const f = (await porIndice('fotos', 'visitaId', v.id)).sort((a, b) => a.ordem - b.ordem); fotosDe.set(v.id, f); totalFotos += f.length; }
+  const ini = de || vs[0].data, fim = ate || vs[vs.length - 1].data;
+  const periodo = `${dataBR(ini)} a ${dataBR(fim)}`;
+
+  const P = await criarPdf('RELATÓRIO DA OBRA', `${obra.nome}  ·  ${periodo}`);
+  P.quadro([
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
+    ['Período', periodo], ['Visitas técnicas', String(vs.length)], ['Fotos', String(totalFotos)]
+  ]);
+  P.titulo('Visitas técnicas no período');
+  let nFoto = 1;
+  for (const v of vs) {
+    const det = [textoClima(v), v.condicao && `canteiro ${v.condicao.toLowerCase()}`].filter(Boolean).join('  ·  ');
+    P.subtitulo(`Visita nº ${numero.get(v.id)}  ·  ${dataBR(v.data)}`, det);
+    let algo = false;
+    algo = P.campo('Equipe presente', v.equipe) || algo;
+    algo = P.campo('Atividades em execução', v.atividades) || algo;
+    algo = P.campo('Ocorrências', v.ocorrencias) || algo;
+    algo = P.campo('Orientações registradas', v.orientacoes) || algo;
+    const fotos = fotosDe.get(v.id);
+    if (!algo && !fotos.length) P.paragrafo('', 'Sem registros nesta visita.', 10);
+    if (fotos.length) { P.y += 1; await P.fotos(fotos, { colunas: 3, maxH: 44, inicio: nFoto, reduzir: 1000 }); nFoto += fotos.length; }
+    P.y += 4;
+  }
+  P.assinatura(hoje());
+  return P.finalizar(`Relatorio-obra-${slug(obra.nome)}-${ini}-a-${fim}.pdf`);
+}
+
+// 3) Relatório FINANCEIRO da obra (uso interno; nunca enviar ao cliente)
+async function gerarRelatorioFinanceiro(obraId) {
+  const obra = await pegar('obras', obraId);
+  const ls = (await porIndice('lancamentos', 'obraId', obra.id))
+    .sort((a, b) => (a.vencimento || '9999').localeCompare(b.vencimento || '9999') || (a.criadoEm || '').localeCompare(b.criadoEm || ''));
+  const soma = (f) => ls.filter(f).reduce((s, l) => s + (Number(l.valor) || 0), 0);
+  const receber = soma((l) => l.tipo === 'Receber'), recebido = soma((l) => l.tipo === 'Receber' && l.pago);
+  const custos = soma((l) => l.tipo === 'Pagar'), pago = soma((l) => l.tipo === 'Pagar' && l.pago);
+  const contrato = Number(obra.valorContrato) || 0, previsto = Number(obra.custoPrevisto) || 0;
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
+  const saldo = recebido - pago;
+
+  const P = await criarPdf('RELATÓRIO FINANCEIRO DA OBRA', `${obra.nome}  ·  uso interno  ·  ${dataBR(hoje())}`);
+  P.quadro([
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
+    ['Valor do contrato', contrato ? moeda(contrato) : 'não informado'], ['Custo previsto', previsto ? moeda(previsto) : 'não informado'],
+    ['Lançamentos', String(ls.length)], ['Gerado em', dataBR(hoje())]
+  ]);
+
+  P.titulo('Resumo');
+  const linhasResumo = [
+    ['Recebido', moeda(recebido), contrato ? `${pct(recebido, contrato)} do contrato` : ''],
+    ['A receber (lançado, em aberto)', moeda(receber - recebido), ''],
+    ...(contrato ? [['Falta receber do contrato', moeda(contrato - recebido), '']] : []),
+    ['Custos pagos', moeda(pago), ''],
+    ['Custos a pagar (em aberto)', moeda(custos - pago), ''],
+    ['Total de custos lançados', moeda(custos), previsto ? `${pct(custos, previsto)} do previsto` : ''],
+    ['Saldo em caixa (recebido - pago)', moeda(saldo), ''],
+    ...(contrato ? [['Resultado previsto (contrato - custos lançados)', moeda(contrato - custos), '']] : [])
+  ];
+  P.tabela([{ t: 'Item', w: 95 }, { t: 'Valor', w: 45, a: 'right', negrito: true }, { t: 'Referência', w: 40, a: 'right' }], linhasResumo,
+    (i, j) => {
+      const rot = linhasResumo[i][0];
+      if (j === 1 && rot.startsWith('Saldo')) return saldo < 0 ? COR.VERMELHO : COR.VERDE;
+      if (j === 2 && rot.startsWith('Total de custos') && previsto && custos > previsto) return COR.VERMELHO;
+      return null;
+    });
+
+  const porClasse = CLASSIFICACOES.map((c) => [c, soma((l) => l.tipo === 'Pagar' && l.classificacao === c)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (porClasse.length) {
+    P.titulo('Custos por classificação');
+    P.tabela([{ t: 'Classificação', w: 100 }, { t: 'Valor', w: 45, a: 'right' }, { t: '% dos custos', w: 35, a: 'right' }],
+      porClasse.map(([c, v]) => [c, moeda(v), pct(v, custos)]));
+  }
+
+  const situacao = (l) => (l.pago ? (l.tipo === 'Receber' ? 'Recebido' : 'Pago') : (statusDe(l) === 'Atrasado' ? 'Atrasado' : 'Em aberto'));
+  const corSituacao = (lista) => (i, j) => {
+    if (j === 4) return lista[i].tipo === 'Receber' ? COR.VERDE : null;
+    if (j === 5) { const s = situacao(lista[i]); return s === 'Atrasado' ? COR.VERMELHO : (s === 'Pago' || s === 'Recebido' ? COR.VERDE : null); }
+    return null;
+  };
+  const colunas = [{ t: 'Data', w: 20 }, { t: 'Descrição', w: 64 }, { t: 'Classificação', w: 32 }, { t: 'Tipo', w: 16 }, { t: 'Valor', w: 28, a: 'right' }, { t: 'Situação', w: 20 }];
+  const linha = (l, data) => [data ? dataBR(data) : 'sem data', l.descricao, l.classificacao, l.tipo, `${l.tipo === 'Receber' ? '+' : '-'} ${moeda(l.valor)}`, situacao(l)];
+
+  const abertos = ls.filter((l) => !l.pago).sort((a, b) => (statusDe(b) === 'Atrasado') - (statusDe(a) === 'Atrasado') || (a.vencimento || '9999').localeCompare(b.vencimento || '9999'));
+  P.titulo(`Contas em aberto (${abertos.length})`);
+  if (abertos.length) P.tabela(colunas.map((c, i) => (i === 0 ? { ...c, t: 'Vencimento' } : c)), abertos.map((l) => linha(l, l.vencimento)), corSituacao(abertos));
+  else P.paragrafo('', 'Nenhuma conta em aberto.', 10);
+
+  if (ls.length) {
+    P.titulo(`Todos os lançamentos (${ls.length})`);
+    P.paragrafo('Data = data do pagamento quando já pago; senão, o vencimento.', '', 8.5);
+    P.y -= 2;
+    P.tabela(colunas, ls.map((l) => linha(l, l.pago && l.dataPagamento ? l.dataPagamento : l.vencimento)), corSituacao(ls));
+  }
+  return P.finalizar(`Relatorio-financeiro-${slug(obra.nome)}-${hoje()}.pdf`, 'documento interno');
+}
+
+// Botão que gera um PDF e envia (Compartilhar do celular) ou baixa
+async function acaoPdf(botao, gerador, modo, titulo) {
+  if (_salvarPendente) await _salvarPendente();
+  const texto = botao.textContent, clique = botao.onclick;
+  botao.disabled = true; botao.textContent = 'Gerando PDF...';
+  try {
+    const { blob, nome } = await gerador();
+    if (modo === 'baixar') { baixar(blob, nome); aviso('PDF baixado'); }
+    else {
+      const r = await compartilharOuBaixar(blob, nome, 'application/pdf', titulo);
+      if (r === 'baixado') aviso('PDF baixado (este aparelho não abriu o Compartilhar)');
+      if (r === 'precisa-toque') {
+        // O celular só abre o Compartilhar logo após um toque: o PDF está pronto, falta um toque.
+        botao.disabled = false; botao.textContent = 'PDF pronto: toque para enviar';
+        botao.onclick = async () => { botao.onclick = clique; botao.textContent = texto; await compartilharOuBaixar(blob, nome, 'application/pdf', titulo); };
+        return;
       }
-      y += alturaLinha;
     }
-  }
-
-  // Assinatura
-  cabe(38); y += 10;
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5); doc.setTextColor(...TEXTO);
-  doc.text(`Curitiba, ${dataExtenso(v.data)}.`, M, y); y += 20;
-  doc.setDrawColor(...CINZA); doc.setLineWidth(0.3); doc.line(M, y, M + 80, y); y += 5;
-  doc.setFont('helvetica', 'bold'); doc.text(EMPRESA.resp, M, y); y += 5;
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...CINZA);
-  doc.text(`Engenheiro Civil  ·  ${EMPRESA.crea}`, M, y);
-
-  // Rodapé em todas as páginas
-  const total = doc.getNumberOfPages();
-  for (let p = 1; p <= total; p++) {
-    doc.setPage(p);
-    doc.setDrawColor(214, 222, 230); doc.setLineWidth(0.2); doc.line(M, H - 13, W - M, H - 13);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...CINZA);
-    doc.text(`${EMPRESA.nome}  ·  CNPJ ${EMPRESA.cnpj}  ·  ${EMPRESA.cidade}`, M, H - 8.5);
-    doc.text(`Página ${p} de ${total}`, W - M, H - 8.5, { align: 'right' });
-  }
-
-  return { blob: doc.output('blob'), nome: `Relatorio-visita-${num}-${slug(obra.nome)}-${v.data}.pdf` };
+  } catch (e) { console.error(e); aviso('Não foi possível gerar o PDF: ' + e.message, 5000); }
+  botao.disabled = false; botao.textContent = texto;
 }
 
 // ---------------------------------------------------------------- backup
