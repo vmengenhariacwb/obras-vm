@@ -231,6 +231,9 @@ async function telaOrcamentos(main) {
     </nav>
     <h1>Orçamentos</h1>
     <p class="sub">Vistoria técnica, orçamento e proposta. Aprovou? Vira obra com um toque.</p>
+    <a class="item lanc" href="#/ia" style="margin-bottom:.6rem"><span><strong>IA do app</strong>
+      <small>${chaveIA() ? 'Ligada neste aparelho · ' + esc(IA_MODELOS[modeloIA()].nome.split(' (')[0]) : 'Desligada neste aparelho: toque para colocar a chave'}</small></span>
+      <span class="valor"><small>${textoGasto(gastoMes().usd)} no mês</small></span></a>
     <a class="item lanc" href="#/modelos" style="margin-bottom:.4rem"><span><strong>Modelos de orçamento</strong>
       <small>Itens prontos por tipo de serviço, com a % de cada um para repartir o valor global</small></span>
       <span class="valor"><b>${nModelos}</b></span></a>
@@ -302,6 +305,18 @@ async function telaOrcamento(main, id) {
     <h2>Fotos da vistoria</h2>
     ${obra ? '<p class="sub">As fotos da vistoria foram para o diário da obra (primeira visita).</p>' : '<div class="fotos" id="fotos"></div>'}
 
+    <div class="card ia-card" style="margin-top:1rem">
+      <h2 style="margin-top:0">Montar com IA</h2>
+      <label for="ia-pedido">Descreva o serviço do seu jeito (dá para ditar no microfone do teclado)</label>
+      <textarea id="ia-pedido" placeholder="Ex.: troca de 80 m² de telha cerâmica, casa térrea, calha nova na frente, só mão de obra, valor global 18 mil.&#10;Para ajustar depois: &quot;tira a calha e põe pintura do beiral&quot;."></textarea>
+      <div class="botoes lado">
+        <button class="btn" id="b-ia-montar" type="button">Montar orçamento com IA</button>
+        <a class="btn sec" href="#/ia">IA do app (chave e tabela)</a>
+      </div>
+      <p class="sub" id="ia-status" style="margin:.5rem 0 0">${chaveIA() ? `Usa a IA ${esc(IA_MODELOS[modeloIA()].nome.split(' (')[0])}, a vistoria acima, sua tabela de preços e seus últimos orçamentos. Você confere tudo antes de enviar.` : 'Para usar, guarde a chave da IA neste aparelho em "IA do app".'}</p>
+      <div id="ia-avisos"></div>
+    </div>
+
     <form id="f-orc2" class="card" autocomplete="off" style="margin-top:1rem">
       <h2 style="margin-top:0">2. Orçamento</h2>
       <label>Fornecimento</label>
@@ -310,8 +325,8 @@ async function telaOrcamento(main, id) {
         <label><input type="radio" name="fornecimento" value="mo" ${o.fornecimento === 'mo' ? 'checked' : ''}><span>Só mão de obra</span></label>
       </div>
       <p class="sub" id="dica-forn" style="margin:.5rem 0 0"></p>
-      <div class="card rapido">
-        <b>Preencher rápido: valor global</b>
+      <details class="card rapido">
+        <summary><b>Sem IA: modelo + valor global</b></summary>
         <label for="r-modelo">Modelo</label>
         <select id="r-modelo">
           <option value="">Repartir entre os itens abaixo</option>
@@ -324,7 +339,7 @@ async function telaOrcamento(main, id) {
           <a class="btn sec" href="#/modelos">Editar modelos</a>
         </div>
         <p class="sub" id="dica-rapido" style="margin:.5rem 0 0"></p>
-      </div>
+      </details>
       <div id="itens"></div>
       <div class="botoes lado">
         <button class="btn sec" id="b-add-item" type="button">+ Adicionar item</button>
@@ -505,6 +520,48 @@ async function telaOrcamento(main, id) {
     o.valorGlobal = global;
     await salvarAgora(true); desenharItens();
     aviso('Valor repartido nos itens. Confira e ajuste se quiser.', 3500);
+  };
+  // ----- IA: descreve o serviço -> a IA devolve o orçamento completo; o app confere a soma e as frases
+  $('#ia-pedido').value = o.pedidoIA || '';
+  $('#ia-pedido').addEventListener('input', (e) => { o.pedidoIA = e.target.value; agendar(); });
+  $('#b-ia-montar').onclick = async (e) => {
+    const b = e.currentTarget, pedido = $('#ia-pedido').value.trim();
+    if (!chaveIA()) { aviso('Primeiro guarde a chave da IA neste aparelho', 3500); location.hash = '#/ia'; return; }
+    if (!pedido) { aviso('Descreva o serviço primeiro', 3000); $('#ia-pedido').focus(); return; }
+    await salvarAgora();
+    const substitui = o.itens.some((it) => (it.descricao || '').trim()) || (o.necessidade || '').trim();
+    b.disabled = true; b.textContent = 'Montando... (até 1 minuto)';
+    $('#ia-avisos').innerHTML = '';
+    try {
+      const { r, usd } = await montarComIA(o, pedido);
+      if (substitui && !confirm('A IA montou o orçamento. Usar o que ela fez?\n\nSubstitui título, escopo, itens, prazo e observações. As medidas e anotações e as fotos continuam como estão.')) return;
+      const forn = r.fornecimento === 'mo' ? 'mo' : 'global';
+      o.fornecimento = forn;
+      document.querySelector(`input[name="fornecimento"][value="${forn}"]`).checked = true;
+      const campo = campoValor(o);
+      o.itens = r.itens.map((x) => ({
+        id: novoId(), descricao: String(x.descricao || '').trim(), un: String(x.un || 'vb').trim(),
+        qtd: Number(x.qtd) > 0 ? Number(x.qtd) : 1, valor: 0, valorMo: 0,
+        valorMat: forn === 'mo' ? centavos(Number(x.material_unit) || 0) : 0,
+        [campo]: centavos(Number(x.valor_unit) || 0)
+      }));
+      // Valor global pedido: o app reparte na proporção que a IA sugeriu e garante a soma exata
+      const g = centavos(Number(r.valor_global) || 0);
+      o.valorGlobal = g > 0 ? g : 0;
+      if (g > 0) aplicarTotais(o.itens, repartir(g, o.itens.map((it) => totalItem(it, campo))), campo);
+      const por = (id, v) => { const el = $('#o-' + id); if (el && typeof v === 'string') el.value = v.trim(); };
+      por('servico', r.servico); por('necessidade', r.escopo); por('prazo', r.prazo); por('observacoes', r.observacoes);
+      $('#t-orc').textContent = $('#o-servico').value || 'Nova vistoria';
+      await salvarAgora(true); desenharItens();
+      $('#r-global').value = valorCampo(o.valorGlobal);
+      const avisos = [...(r.avisos || []), ...conferirOrcamento(o, false).map((p) => 'Conferir: ' + p)];
+      $('#ia-avisos').innerHTML = `<div class="ia-avisos">
+        ${avisos.length ? `<b>Avisos da IA (só para você)</b><ul>${avisos.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : '<b>A IA não deixou avisos.</b>'}
+        <small>Custo deste pedido: ${textoGasto(usd)}. Confira os itens e os valores abaixo antes de enviar.</small></div>`;
+      aviso('Orçamento montado. Confira antes de enviar.', 4000);
+    } catch (err) {
+      $('#ia-avisos').innerHTML = `<div class="ia-avisos erro"><b>Não deu certo:</b> ${esc(err.message)}</div>`;
+    } finally { b.disabled = false; b.textContent = 'Montar orçamento com IA'; }
   };
   // Mexeu no valor de um item com global combinado: esse item fica fixo e os outros se ajustam.
   // Mexeu na quantidade: o total do item continua o mesmo (o valor unitário é recalculado).

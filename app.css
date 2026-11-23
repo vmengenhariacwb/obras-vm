@@ -183,3 +183,13 @@ label.check input { width: 22px; height: 22px; min-height: 0; accent-color: var(
 .linha-peso input[name="md-peso"] { text-align: right; }
 .linha-peso textarea { min-height: 0; resize: none; padding: .45rem .6rem; font-size: .92rem; line-height: 1.3; }
 .linha-peso .link-perigo { font-size: 1rem; }
+/* IA */
+.ia-card { border-color: rgba(59, 158, 255, .45); }
+.ia-card textarea { min-height: 110px; }
+.ia-avisos { margin-top: .8rem; padding: .8rem 1rem; border-radius: 10px; background: var(--card); border: 1px solid var(--borda); font-size: .9rem; }
+.ia-avisos b { color: var(--titulo); }
+.ia-avisos ul { margin: .4rem 0 .5rem; padding-left: 1.1rem; }
+.ia-avisos small { color: var(--texto-2); }
+.ia-avisos.erro { border-color: var(--perigo); }
+details.rapido > summary { cursor: pointer; }
+.tabela-ia { white-space: pre-wrap; font-size: .75rem; max-height: 50vh; overflow: auto; background: var(--fundo); padding: .6rem; border-radius: 8px; }
