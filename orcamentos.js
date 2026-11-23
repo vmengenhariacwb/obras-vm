@@ -391,6 +391,8 @@ async function telaOrcamento(main, id) {
       <button class="btn zap" id="b-orc-enviar" type="button">Gerar PDF e enviar</button>
       <button class="btn sec" id="b-orc-baixar" type="button">Baixar PDF</button>
     </div>
+    <div class="botoes"><button class="btn sec" id="b-copiar-proposta" type="button">Copiar para a proposta no Canva</button></div>
+    <p class="sub" style="margin:.4rem 0 0">Copia os dados deste orçamento num texto pronto. Cole no Claude (no PC) e peça a proposta oficial no Canva.</p>
     ${obra ? '' : '<div class="botoes"><button class="btn" id="b-virar-obra" type="button">Aprovado: transformar em obra</button></div>'}
     <div class="botoes"><button class="btn perigo" id="b-excluir-orc" type="button">Excluir orçamento</button></div>`;
 
@@ -715,6 +717,22 @@ async function telaOrcamento(main, id) {
   };
   $('#b-orc-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Proposta V&M Engenharia');
   $('#b-orc-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Proposta V&M Engenharia');
+  $('#b-copiar-proposta').onclick = async () => {
+    await salvarAgora();
+    const texto = await textoParaProposta(o);
+    let copiou = false;
+    try { await navigator.clipboard.writeText(texto); copiou = true; } catch (e) { /* sem permissão: mostra o texto */ }
+    if (copiou) { aviso('Copiado! Cole no Claude e peça a proposta no Canva.', 4500); return; }
+    // Sem acesso à área de transferência: mostra o texto selecionado para copiar na mão
+    const caixa = document.createElement('div'); caixa.className = 'ver-imagem';
+    caixa.innerHTML = `<p style="color:#fff;margin:0">Copie o texto abaixo (segure em cima › Selecionar tudo › Copiar):</p>
+      <textarea readonly style="width:100%;max-width:640px;height:60vh;font-size:.8rem"></textarea>
+      <button class="btn" type="button">Fechar</button>`;
+    caixa.querySelector('textarea').value = texto;
+    caixa.querySelector('button').onclick = () => caixa.remove();
+    document.body.appendChild(caixa);
+    caixa.querySelector('textarea').select();
+  };
   if ($('#b-virar-obra')) $('#b-virar-obra').onclick = async () => { await salvarAgora(); transformarEmObra(o); };
   $('#b-excluir-orc').onclick = async () => {
     const fotos = await porIndice('fotos', 'visitaId', o.id);
@@ -756,6 +774,43 @@ async function transformarEmObra(o) {
 
 // ---------------------------------------------------------------- PDFs para o cliente
 // Partes comuns do PDF simples e da proposta completa
+// ---------------------------------------------------------------- texto para a proposta oficial (Canva, feita no Claude)
+async function textoParaProposta(o) {
+  const mo = o.fornecimento === 'mo', campo = mo ? 'valorMo' : 'valor', t = totaisOrc(o);
+  const its = (o.itens || []).filter((it) => (it.descricao || '').trim());
+  const mats = mo ? (o.materiais || []).filter((m) => (m.descricao || '').trim()) : [];
+  const fotos = (await porIndice('fotos', 'visitaId', o.id)).filter((f) => !f.foraDaProposta);
+  const linha = (rot, v) => (String(v || '').trim() ? `${rot}: ${String(v).trim()}` : null);
+  const partes = [
+    `Proposta oficial no Canva a partir do orçamento nº ${o.numero || ''} do app Obras V&M:`,
+    '',
+    linha('Serviço', o.servico), linha('Cliente', o.cliente), linha('Local', o.local),
+    linha('Data da vistoria', dataBR(o.data)),
+    `Fornecimento: ${mo ? 'só mão de obra (material por conta do cliente, como estimativa)' : 'material e mão de obra'}`,
+    '',
+    'Escopo:', (o.necessidade || '').trim() || '(sem escopo)',
+    '',
+    mo ? 'Itens (mão de obra):' : 'Itens (material e mão de obra):',
+    ...its.map((it, i) => `${i + 1}. ${it.descricao.trim()} — ${qtdTexto(it.qtd)} ${it.un || ''} × ${moeda(it[campo])} = ${moeda(totalItem(it, campo))}`.replace(/\s+×/, ' ×')),
+    `${mo ? 'Total da mão de obra' : 'Valor total'}: ${moeda(t.contrato)}`,
+    Number(o.valorGlobal) > 0 ? `(valor global combinado: ${moeda(o.valorGlobal)})` : null
+  ];
+  if (mats.length || faixaMaterial(o)) {
+    partes.push('', 'Materiais por conta do cliente (estimativa):',
+      ...mats.map((m, i) => `${i + 1}. ${m.descricao.trim()}${m.qtd ? ` — ${m.qtd.trim()}` : ''}${Number(m.valor) > 0 ? ` — ${moeda(m.valor)}` : ''}`),
+      `Material estimado: ${textoMaterial(o, t)}`);
+  }
+  partes.push('',
+    linha('Prazo', o.prazo),
+    `Pagamento: ${(o.pagamento || '').trim() || PAGAMENTO_PADRAO}`,
+    `Validade: ${Number(o.validadeDias) || 30} dias`,
+    linha('Observações / não incluso', o.observacoes),
+    (o.medidas || '').trim() ? `\nAnotações da vistoria (só para você, Claude; não vão ao cliente):\n${o.medidas.trim()}` : null,
+    '',
+    fotos.length ? `Fotos: ${fotos.length} foto(s) marcada(s) "Na proposta" no app (mando separadas se precisar).` : 'Fotos: nenhuma marcada para a proposta.');
+  return partes.filter((p) => p !== null).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
 function prepararPdfOrc(o) {
   const its = (o.itens || []).filter((it) => (it.descricao || '').trim() || it.valor || it.valorMo || it.valorMat);
   if (!its.length) throw new Error('inclua pelo menos um item no orçamento');
