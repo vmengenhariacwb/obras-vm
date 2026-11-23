@@ -1,5 +1,5 @@
 'use strict';
-// Obras V&M: diário de obra com fotos e relatório de visita em PDF.
+// Obras V&M: diário de obra com fotos e relatório de acompanhamento em PDF.
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 const EMPRESA = {
@@ -200,7 +200,7 @@ async function telaInicio(main) {
 
   main.innerHTML = `
     <h1>Obras</h1>
-    <p class="sub">Diário de obra, fotos e relatório de visita.</p>
+    <p class="sub">Diário de obra, fotos e relatórios de acompanhamento.</p>
     ${!obras.length ? '<p class="vazio">Nenhuma obra ainda. Toque em <b>+ Nova obra</b> para começar.</p>' : `
       <h2>Em andamento (${andamento.length})</h2>
       ${andamento.length ? listaObras(andamento) : '<p class="vazio">Nenhuma obra em andamento.</p>'}
@@ -329,7 +329,7 @@ async function telaObra(main, id, aba) {
       }).join('')}</ul>` : '<p class="vazio">Nenhuma visita registrada.</p>'}
       ${visitas.length ? `
       <details class="card" style="margin-top:1rem">
-        <summary style="cursor:pointer;color:var(--titulo);font-weight:600">Relatório da obra (PDF para o cliente)</summary>
+        <summary style="cursor:pointer;color:var(--titulo);font-weight:600">Relatório consolidado (PDF para o cliente)</summary>
         <p class="sub" style="margin:.6rem 0 0">Junta as visitas do período num PDF só, com atividades, orientações e fotos. Não inclui nada do financeiro.</p>
         <div class="duas">
           <div><label for="r-de">De</label><input id="r-de" type="date" value="${esc(visitas[0].data)}"></div>
@@ -356,8 +356,8 @@ async function telaObra(main, id, aba) {
       if (de && ate && de > ate) throw new Error('a data "De" está depois da data "Até"');
       return gerarRelatorioObra(obra.id, de, ate);
     };
-    $('#b-rel-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Relatório da obra');
-    $('#b-rel-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Relatório da obra');
+    $('#b-rel-enviar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'enviar', 'Relatório de Acompanhamento de Obra');
+    $('#b-rel-baixar').onclick = (e) => acaoPdf(e.currentTarget, gerador, 'baixar', 'Relatório de Acompanhamento de Obra');
   }
 }
 
@@ -414,8 +414,8 @@ async function telaVisita(main, id) {
 
   await mostrarFotos(v, obra);
 
-  $('#b-enviar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'enviar', 'Relatório de visita');
-  $('#b-baixar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'baixar', 'Relatório de visita');
+  $('#b-enviar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'enviar', 'Relatório de Acompanhamento de Obra');
+  $('#b-baixar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'baixar', 'Relatório de Acompanhamento de Obra');
 
   $('#b-excluir-visita').onclick = async () => {
     const fotos = await porIndice('fotos', 'visitaId', v.id);
@@ -963,7 +963,7 @@ async function gerarPdf(visitaId) {
   const num = visitas.findIndex((x) => x.id === v.id) + 1;
   const fotos = (await porIndice('fotos', 'visitaId', v.id)).sort((a, b) => a.ordem - b.ordem);
 
-  const P = await criarPdf('RELATÓRIO DE VISITA TÉCNICA', `Diário de obra nº ${num}  ·  ${dataBR(v.data)}`);
+  const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `nº ${num}  ·  ${dataBR(v.data)}  ·  ${obra.nome}`);
   P.quadro([
     ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
     ['Data da visita', dataBR(v.data)], ['Clima', textoClima(v)], ['Condição do canteiro', v.condicao]
@@ -977,7 +977,7 @@ async function gerarPdf(visitaId) {
     await P.fotos(fotos);
   }
   P.assinatura(v.data);
-  return P.finalizar(`Relatorio-visita-${num}-${slug(obra.nome)}-${v.data}.pdf`);
+  return P.finalizar(`Relatorio-acompanhamento-${num}-${slug(obra.nome)}-${v.data}.pdf`);
 }
 
 // 2) Relatório da OBRA num período (para o cliente; sem nada do financeiro)
@@ -993,7 +993,7 @@ async function gerarRelatorioObra(obraId, de, ate) {
   const ini = de || vs[0].data, fim = ate || vs[vs.length - 1].data;
   const periodo = `${dataBR(ini)} a ${dataBR(fim)}`;
 
-  const P = await criarPdf('RELATÓRIO DA OBRA', `${obra.nome}  ·  ${periodo}`);
+  const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `Consolidado  ·  ${periodo}  ·  ${obra.nome}`);
   P.quadro([
     ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
     ['Período', periodo], ['Visitas técnicas', String(vs.length)], ['Fotos', String(totalFotos)]
@@ -1014,7 +1014,7 @@ async function gerarRelatorioObra(obraId, de, ate) {
     P.y += 4;
   }
   P.assinatura(hoje());
-  return P.finalizar(`Relatorio-obra-${slug(obra.nome)}-${ini}-a-${fim}.pdf`);
+  return P.finalizar(`Relatorio-acompanhamento-consolidado-${slug(obra.nome)}-${ini}-a-${fim}.pdf`);
 }
 
 // 3) Relatório FINANCEIRO da obra (uso interno; nunca enviar ao cliente)
