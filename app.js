@@ -2,6 +2,9 @@
 // Obras V&M: diário de obra com fotos e relatório de acompanhamento em PDF.
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
+// Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
+const VERSAO_APP = 15;
+
 const EMPRESA = {
   nome: 'V&M Engenharia',
   cnpj: '46.301.194/0001-66',
@@ -263,7 +266,7 @@ async function telaInicio(main) {
         <label class="btn sec" style="margin:0">Restaurar backup<input id="b-restaurar" type="file" accept=".json,application/json" hidden></label>
       </div>
     </div>
-    <p class="rodape-info">${esc(uso)}<br>${EMPRESA.nome} · ${EMPRESA.resp} · ${EMPRESA.crea}</p>
+    <p class="rodape-info">${esc(uso)}<br>${EMPRESA.nome} · ${EMPRESA.resp} · ${EMPRESA.crea}<br>Versão do app: ${VERSAO_APP}</p>
     <a class="btn flutuante" href="#/obra/nova">+ Nova obra</a>`;
 
   if (navigator.onLine) prepararGoogle().catch(() => {}); // deixa o login pronto para o toque
@@ -1405,14 +1408,31 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && dr
 window.addEventListener('hashchange', rota);
 document.addEventListener('visibilitychange', () => { if (document.hidden && _salvarPendente) _salvarPendente(); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  // Quando chega uma versão nova do app, recarrega uma vez para usá-la (só se já havia uma versão antes).
+  // Quando chega uma versão nova do app, recarrega para usá-la: na hora, se você está numa lista;
+  // se está num formulário, só quando sair dele (o que você digitou é salvo antes).
   const tinhaVersao = !!navigator.serviceWorker.controller;
-  navigator.serviceWorker.addEventListener('controllerchange', async () => {
-    if (!tinhaVersao) return;
+  const naLista = () => ['', 'orcamentos', 'modelos', 'ia'].includes(location.hash.replace(/^#\/?/, '').split('/')[0]);
+  let recarregarAoSair = false;
+  const recarregar = async () => {
     if (_salvarPendente) await _salvarPendente();
+    try { sessionStorage.setItem('app-atualizado', '1'); } catch (e) { /* sem armazenamento */ }
     location.reload();
+  };
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!tinhaVersao) return;
+    if (naLista()) recarregar(); else recarregarAoSair = true;
   });
-  navigator.serviceWorker.register('sw.js').catch(console.error);
+  window.addEventListener('hashchange', () => { if (recarregarAoSair && naLista()) recarregar(); });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    // Ao voltar para o app, confere se saiu versão nova
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && navigator.onLine) reg.update().catch(() => {}); });
+  }).catch(console.error);
+  try {
+    if (sessionStorage.getItem('app-atualizado')) {
+      sessionStorage.removeItem('app-atualizado');
+      setTimeout(() => aviso(`App atualizado: versão ${VERSAO_APP}`, 3500), 600);
+    }
+  } catch (e) { /* sem armazenamento */ }
 }
 mostrarRede();
 rota();

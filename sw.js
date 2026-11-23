@@ -1,6 +1,6 @@
 // Guarda os arquivos do app no celular para ele abrir sem internet.
-// Ao mudar qualquer arquivo do app, aumentar a versão abaixo.
-const VERSAO = 'obras-vm-v14';
+// Ao mudar qualquer arquivo do app, aumentar a versão abaixo (e VERSAO_APP no app.js, que aparece no rodapé).
+const VERSAO = 'obras-vm-v15';
 const ARQUIVOS = [
   './',
   'index.html',
@@ -17,7 +17,8 @@ const ARQUIVOS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSAO).then((c) => c.addAll(ARQUIVOS)).then(() => self.skipWaiting()));
+  // cache: 'reload' = baixa direto do site, sem pegar a cópia antiga que o navegador guarda por alguns minutos
+  e.waitUntil(caches.open(VERSAO).then((c) => c.addAll(ARQUIVOS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
