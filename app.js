@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 17;
+const VERSAO_APP = 18;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -300,10 +300,7 @@ async function telaObra(main, id, aba) {
         <input id="o-cliente" name="cliente" value="${esc(obra.cliente)}">
         <label for="o-local">Local (bairro e cidade)</label>
         <input id="o-local" name="local" value="${esc(obra.local)}" placeholder="Ex.: Uberaba, Curitiba/PR">
-        <div class="duas">
-          <div><label for="o-art">Nº da ART</label><input id="o-art" name="art" inputmode="numeric" value="${esc(obra.art)}"></div>
-          <div><label for="o-inicio">Início</label><input id="o-inicio" name="inicio" type="date" value="${esc(obra.inicio)}"></div>
-        </div>
+        <label for="o-inicio">Início</label><input id="o-inicio" name="inicio" type="date" value="${esc(obra.inicio)}">
         <div class="duas">
           <div><label for="o-contrato">Valor do contrato (R$)</label><input id="o-contrato" name="valorContrato" inputmode="decimal" value="${valorCampo(obra.valorContrato)}" placeholder="0,00"></div>
           <div><label for="o-previsto">Custo previsto (R$)</label><input id="o-previsto" name="custoPrevisto" inputmode="decimal" value="${valorCampo(obra.custoPrevisto)}" placeholder="0,00"></div>
@@ -1003,7 +1000,7 @@ async function gerarPdf(visitaId) {
 
   const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `nº ${num}  ·  ${dataBR(v.data)}  ·  ${obra.nome}`);
   P.quadro([
-    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
     ['Data da visita', dataBR(v.data)], ['Clima', textoClima(v)], ['Condição do canteiro', v.condicao]
   ]);
   P.titulo('Equipe presente'); P.paragrafo(v.equipe);
@@ -1033,7 +1030,7 @@ async function gerarRelatorioObra(obraId, de, ate) {
 
   const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `Consolidado  ·  ${periodo}  ·  ${obra.nome}`);
   P.quadro([
-    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', obra.art],
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
     ['Período', periodo], ['Visitas técnicas', String(vs.length)], ['Fotos', String(totalFotos)]
   ]);
   P.titulo('Visitas técnicas no período');
