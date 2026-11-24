@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 18;
+const VERSAO_APP = 19;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -301,6 +301,10 @@ async function telaObra(main, id, aba) {
         <label for="o-local">Local (bairro e cidade)</label>
         <input id="o-local" name="local" value="${esc(obra.local)}" placeholder="Ex.: Uberaba, Curitiba/PR">
         <label for="o-inicio">Início</label><input id="o-inicio" name="inicio" type="date" value="${esc(obra.inicio)}">
+        <div id="box-art" ${(obra.art || '').trim() ? '' : 'hidden'}>
+          <label for="o-art">Nº da ART</label><input id="o-art" name="art" inputmode="numeric" value="${esc(obra.art)}" placeholder="Em branco = não aparece nos relatórios">
+        </div>
+        ${(obra.art || '').trim() ? '' : '<p style="margin:.4rem 0 0"><a href="#" id="l-art">+ Informar ART (se o serviço tiver)</a></p>'}
         <div class="duas">
           <div><label for="o-contrato">Valor do contrato (R$)</label><input id="o-contrato" name="valorContrato" inputmode="decimal" value="${valorCampo(obra.valorContrato)}" placeholder="0,00"></div>
           <div><label for="o-previsto">Custo previsto (R$)</label><input id="o-previsto" name="custoPrevisto" inputmode="decimal" value="${valorCampo(obra.custoPrevisto)}" placeholder="0,00"></div>
@@ -330,6 +334,7 @@ async function telaObra(main, id, aba) {
     pedirArmazenamentoFixo();
     if (nova) location.hash = '#/obra/' + obra.id; else { aviso('Dados da obra salvos'); rota(); }
   };
+  if ($('#l-art')) $('#l-art').onclick = (e) => { e.preventDefault(); $('#box-art').hidden = false; e.target.parentNode.remove(); $('#o-art').focus(); };
   if (nova) return;
 
   const excluirObra = async () => {
@@ -1000,7 +1005,7 @@ async function gerarPdf(visitaId) {
 
   const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `nº ${num}  ·  ${dataBR(v.data)}  ·  ${obra.nome}`);
   P.quadro([
-    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', (obra.art || '').trim()],
     ['Data da visita', dataBR(v.data)], ['Clima', textoClima(v)], ['Condição do canteiro', v.condicao]
   ]);
   P.titulo('Equipe presente'); P.paragrafo(v.equipe);
@@ -1030,7 +1035,7 @@ async function gerarRelatorioObra(obraId, de, ate) {
 
   const P = await criarPdf('RELATÓRIO DE ACOMPANHAMENTO DE OBRA', `Consolidado  ·  ${periodo}  ·  ${obra.nome}`);
   P.quadro([
-    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local],
+    ['Obra', obra.nome], ['Cliente', obra.cliente], ['Local', obra.local], ['ART nº', (obra.art || '').trim()],
     ['Período', periodo], ['Visitas técnicas', String(vs.length)], ['Fotos', String(totalFotos)]
   ]);
   P.titulo('Visitas técnicas no período');

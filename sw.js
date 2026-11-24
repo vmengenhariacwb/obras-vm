@@ -1,6 +1,6 @@
 // Guarda os arquivos do app no celular para ele abrir sem internet.
 // Ao mudar qualquer arquivo do app, aumentar a versão abaixo (e VERSAO_APP no app.js, que aparece no rodapé).
-const VERSAO = 'obras-vm-v18';
+const VERSAO = 'obras-vm-v19';
 const ARQUIVOS = [
   './',
   'index.html',
