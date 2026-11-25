@@ -460,7 +460,8 @@ async function legendaFotoIA(blob, contexto) {
   try {
     resp = await cliente.messages.create({
       model: IA_MODELO_LEGENDA,
-      max_tokens: 200,
+      max_tokens: 400,
+      thinking: { type: 'disabled' },   // legenda é curta: sem raciocínio (mais rápido e não estoura o limite)
       system: `Você escreve legendas de fotos para relatórios de acompanhamento de obra da V&M Engenharia.
 Responda SÓ com a legenda: uma frase técnica curta, de até 12 palavras, em português, sem aspas, sem ponto final e sem "Foto".
 Estilo: "Forro aberto, com o tubo do Ventokit no entreforro"; "Entulho de obra retirado do interior do tubo"; "Tubo religado com luva e vedação em epóxi".
@@ -478,7 +479,7 @@ Descreva o que aparece na foto, usando o contexto da visita para dar os nomes t�
   somarGasto(usd);
   if (resp.stop_reason === 'refusal') throw new Error('a IA não conseguiu descrever essa foto.');
   const leg = textoResposta(resp).trim().split('\n')[0]
-    .replace(/^["“'«]+|["”'»]+$/g, '').replace(/^Foto\s*\d*\s*[-–:]\s*/i, '').replace(/\.$/, '').trim();
+    .replace(/^(Legenda|Foto\s*\d*)\s*[-–:]\s*/i, '').replace(/^["“'«]+|["”'»]+$/g, '').replace(/\.$/, '').trim();
   if (!leg) throw new Error('a IA não devolveu legenda.');
   return { legenda: leg, usd };
 }

@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 21;
+const VERSAO_APP = 22;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
