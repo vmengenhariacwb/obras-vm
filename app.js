@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 19;
+const VERSAO_APP = 20;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -632,6 +632,11 @@ async function telaLancamento(main, id, obraIdNovo, tipoNovo) {
     <h1>${novo ? (receber ? 'Novo recebimento' : 'Nova despesa') : 'Lançamento'}</h1>
     ${novo ? '' : `<p class="sub">Status: <em class="st st-${slug(statusDe(l))}">${statusDe(l)}</em></p>`}
     <form id="f-lanc" class="card" autocomplete="off">
+      ${novo ? `<div id="box-nf" style="margin-bottom:1rem">
+        <label class="add-foto" style="min-height:64px">📷 Ler nota fiscal com IA<input id="i-nf" type="file" accept="image/*"></label>
+        <p class="sub" style="margin:.4rem 0 0">Tire a foto da nota (ou escolha da galeria). A IA preenche os campos e a foto fica guardada como comprovante. Confira antes de salvar.</p>
+        <div id="nf-res"></div>
+      </div>` : ''}
       <div class="segmento" role="radiogroup" aria-label="Tipo">
         <label><input type="radio" name="tipo" value="Pagar" ${l.tipo === 'Pagar' ? 'checked' : ''}><span>Pagar (saída)</span></label>
         <label><input type="radio" name="tipo" value="Receber" ${l.tipo === 'Receber' ? 'checked' : ''}><span>Receber (entrada)</span></label>
@@ -670,6 +675,7 @@ async function telaLancamento(main, id, obraIdNovo, tipoNovo) {
     const n = parseInt(form.parcelas?.value, 10) || 1;
     $('#rot-valor').textContent = n > 1 ? 'Valor total (R$) *' : 'Valor (R$) *';
     $('#dica-parc').hidden = n <= 1;
+    if ($('#box-nf')) $('#box-nf').hidden = rec;
   };
   form.addEventListener('change', ajustarTextos);
   form.addEventListener('input', ajustarTextos);
@@ -704,6 +710,62 @@ async function telaLancamento(main, id, obraIdNovo, tipoNovo) {
     });
   };
   desenharAnexos();
+
+  // Nota fiscal pela IA: a foto vira comprovante e a IA preenche os campos (você confere e salva).
+  const dataBR = (s) => (s || '').split('-').reverse().join('/');
+  const dataOk = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+  const preencherNF = async (r, usd) => {
+    if (!r.eh_nota) { $('#nf-res').innerHTML = '<p class="sub" style="color:var(--alerta,#f59e0b)">A IA achou que essa foto não é uma nota fiscal. A foto ficou anexada; preencha os campos à mão.</p>'; return; }
+    form.tipo.value = 'Pagar';
+    const desc = [r.descricao_curta, r.fornecedor].map((s) => (s || '').trim()).filter(Boolean).join(' · ');
+    if (desc) $('#l-desc').value = desc;
+    if (CLASSIFICACOES.includes(r.classificacao)) $('#l-class').value = r.classificacao;
+    if (r.valor_total > 0) $('#l-valor').value = valorCampo(r.valor_total);
+    const venc = dataOk(r.vencimento) ? r.vencimento : dataOk(r.data_emissao) ? r.data_emissao : '';
+    if (venc) $('#l-venc').value = venc;
+    if (r.forma_pagamento && FORMAS.includes(r.forma_pagamento)) $('#l-forma').value = r.forma_pagamento;
+    if (['Pix', 'Dinheiro', 'Cartão de débito', 'Cartão de crédito'].includes(r.forma_pagamento) && !dataOk(r.vencimento)) {
+      $('#l-pago').checked = true; $('#box-datapag').hidden = false;
+      $('#l-datapag').value = dataOk(r.data_emissao) ? r.data_emissao : hoje();
+    }
+    const linhas = [];
+    const cab = [r.numero_nota ? `NF nº ${r.numero_nota}` : '', r.fornecedor, r.cnpj_fornecedor ? `CNPJ/CPF ${r.cnpj_fornecedor}` : ''].filter(Boolean).join(' · ');
+    if (cab) linhas.push(cab);
+    if (dataOk(r.data_emissao)) linhas.push(`Emissão: ${dataBR(r.data_emissao)}`);
+    if ((r.itens || []).length) linhas.push('Itens:', ...r.itens.map((it) => `- ${it.descricao}${it.quantidade ? ` (${it.quantidade})` : ''}${it.valor ? `: ${moeda(it.valor)}` : ''}`));
+    const obsAntiga = $('#l-obs').value.trim();
+    $('#l-obs').value = [linhas.join('\n'), obsAntiga].filter(Boolean).join('\n\n');
+    ajustarTextos();
+    // Nota já lançada antes? (mesmo número e mesmo CNPJ na observação)
+    let repetida = false;
+    if (r.numero_nota && r.cnpj_fornecedor) {
+      repetida = (await todos('lancamentos')).some((x) => (x.observacao || '').includes(`NF nº ${r.numero_nota} `) && (x.observacao || '').includes(r.cnpj_fornecedor));
+    }
+    const avisos = [...(repetida ? ['Parece que esta nota já foi lançada antes (mesmo número e CNPJ). Confira para não lançar duas vezes.'] : []), ...(r.avisos || [])];
+    $('#nf-res').innerHTML = `<div class="card" style="margin:.6rem 0 0;padding:.7rem .9rem">
+      <p style="margin:0"><b>✓ Nota lida.</b> Confira os campos abaixo e toque em Salvar.</p>
+      ${avisos.length ? `<ul style="margin:.4rem 0 0;padding-left:1.1rem">${avisos.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}
+      <p class="sub" style="margin:.4rem 0 0">Custo da leitura: ${textoGasto(usd)}</p></div>`;
+  };
+  if ($('#i-nf')) $('#i-nf').onchange = async (e) => {
+    const arq = e.target.files[0]; e.target.value = '';
+    if (!arq) return;
+    let foto;
+    try { aviso('Preparando foto...', 60000); foto = await processarFoto(arq); } catch (er) { aviso('Foto não pôde ser lida', 4000); return; }
+    novosAnexos.push({ ...foto, legenda: 'Nota fiscal' }); desenharAnexos();
+    const rotulo = $('#box-nf .add-foto'); rotulo.style.pointerEvents = 'none'; rotulo.firstChild.textContent = 'Lendo a nota com IA...';
+    $('#nf-res').innerHTML = '';
+    aviso('Lendo a nota com IA...', 90000);
+    try {
+      const { r, usd } = await lerNotaFiscal(foto.blob);
+      await preencherNF(r, usd);
+      aviso('Nota lida: confira e salve', 3500);
+    } catch (er) {
+      aviso('Erro: ' + er.message, 7000);
+      $('#nf-res').innerHTML = `<p class="sub" style="margin:.5rem 0 0">Não deu para ler: ${esc(er.message)} A foto ficou anexada; preencha à mão ou tente outra foto.</p>`;
+    }
+    rotulo.style.pointerEvents = ''; rotulo.firstChild.textContent = '📷 Ler outra nota fiscal com IA';
+  };
 
   form.onsubmit = async (e) => {
     e.preventDefault();

@@ -277,3 +277,76 @@ async function telaIA(main) {
     } catch (err) { console.error(err); aviso('Erro: ' + (err.status ? erroIA(err) : err).message, 6000); b.disabled = false; b.textContent = 'Testar a conexão'; }
   };
 }
+
+// ---------------------------------------------------------------- leitura de nota fiscal (foto → lançamento)
+// A foto vai só para a IA ler; o app guarda a foto como comprovante do lançamento (aparelho + Drive).
+const esquemaNF = () => ({
+  type: 'object',
+  properties: {
+    eh_nota: { type: 'boolean', description: 'true se a imagem é uma nota fiscal, cupom, recibo ou boleto de compra/serviço' },
+    fornecedor: { type: 'string', description: 'Nome da loja ou prestador (nome fantasia se houver, curto)' },
+    cnpj_fornecedor: { type: 'string', description: 'CNPJ ou CPF do emitente, como aparece; vazio se não aparecer' },
+    numero_nota: { type: 'string', description: 'Número da nota/cupom; vazio se não aparecer' },
+    data_emissao: { type: 'string', description: 'AAAA-MM-DD; vazio se não der para ler' },
+    vencimento: { type: 'string', description: 'AAAA-MM-DD do vencimento se a nota mostrar boleto/duplicata a pagar; senão vazio' },
+    valor_total: { type: 'number', description: 'Valor total a pagar da nota, em reais (0 se não der para ler)' },
+    forma_pagamento: { type: 'string', enum: FORMAS, description: 'Como foi pago, se a nota mostrar; vazio se não mostrar' },
+    descricao_curta: { type: 'string', description: 'Resumo do que foi comprado em até 6 palavras, ex.: "Cimento, areia e argamassa"' },
+    classificacao: { type: 'string', enum: CLASSIFICACOES },
+    itens: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { descricao: { type: 'string' }, quantidade: { type: 'string' }, valor: { type: 'number' } },
+        required: ['descricao', 'quantidade', 'valor'],
+        additionalProperties: false
+      }
+    },
+    avisos: { type: 'array', items: { type: 'string' }, description: 'O que ficou ilegível ou duvidoso; lista vazia se tudo certo' }
+  },
+  required: ['eh_nota', 'fornecedor', 'cnpj_fornecedor', 'numero_nota', 'data_emissao', 'vencimento', 'valor_total', 'forma_pagamento', 'descricao_curta', 'classificacao', 'itens', 'avisos'],
+  additionalProperties: false
+});
+
+const INSTRUCOES_NF = `Você lê fotos de notas fiscais, cupons e recibos de despesas de obra da V&M Engenharia (Curitiba/PR) e devolve os dados para o lançamento financeiro.
+- Leia exatamente o que está escrito. Nunca invente: o que não der para ler fica vazio (ou 0) e entra em "avisos".
+- valor_total: o total final a pagar (depois de descontos), não a soma de impostos.
+- Datas no formato AAAA-MM-DD. Notas brasileiras usam DD/MM/AAAA.
+- classificacao: "Material" para material de construção; "Equipamentos/locação" para aluguel de equipamento, caçamba ou andaime; "Mão de obra" ou "Prestação de serviços" para serviço; "Contas" para água, luz, internet; "Impostos" para guias e tributos; "Fornecedor" se não se encaixar.
+- itens: os produtos da nota, com quantidade e unidade em texto (ex.: "10 sc", "2 m³") e valor total do item. No máximo 30 itens; se houver mais, agrupe os últimos.
+- Se a imagem não for nota/cupom/recibo, eh_nota = false.`;
+
+async function blobParaBase64(blob) {
+  const url = await new Promise((ok, erro) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = erro; r.readAsDataURL(blob); });
+  return String(url).split(',')[1];
+}
+
+// Lê a nota fiscal da foto. Devolve { r, usd }.
+async function lerNotaFiscal(blob) {
+  const cliente = await clienteIA();
+  const chaveModelo = modeloIA();
+  let resp;
+  try {
+    resp = await cliente.messages.create({
+      model: IA_MODELOS[chaveModelo].id,
+      max_tokens: 8000,
+      system: INSTRUCOES_NF,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await blobParaBase64(blob) } },
+          { type: 'text', text: `Leia esta nota. Hoje é ${hoje()}.` }
+        ]
+      }],
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: esquemaNF() } }
+    });
+  } catch (e) { console.error(e); throw erroIA(e); }
+  const usd = custoUso(resp.usage || {}, chaveModelo);
+  somarGasto(usd);
+  if (resp.stop_reason === 'refusal') throw new Error('a IA não conseguiu ler essa imagem.');
+  if (resp.stop_reason === 'max_tokens') throw new Error('a nota tem itens demais para ler de uma vez.');
+  const txt = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  let r;
+  try { r = JSON.parse(txt); } catch (e) { throw new Error('a resposta da IA veio num formato inesperado. Tente de novo.'); }
+  return { r, usd };
+}
