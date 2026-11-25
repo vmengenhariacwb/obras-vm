@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 23;
+const VERSAO_APP = 24;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -516,6 +516,11 @@ async function mostrarFotos(v, obra) {
     const url = URL.createObjectURL(f.blob); _urls.push(url);
     return `<div class="foto">
       <img src="${url}" alt="Foto ${i + 1}" loading="lazy">
+      ${fotos.length > 1 ? `<div class="mover">
+        <button type="button" data-mover="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="Subir a foto ${i + 1}">↑</button>
+        <span>Foto ${i + 1}</span>
+        <button type="button" data-mover="${i}" data-dir="1" ${i === fotos.length - 1 ? 'disabled' : ''} aria-label="Descer a foto ${i + 1}">↓</button>
+      </div>` : ''}
       ${naVisita ? `<textarea class="legenda" rows="2" data-legenda="${f.id}" placeholder="Legenda da foto ${i + 1}" aria-label="Legenda da foto ${i + 1}">${esc(f.legenda)}</textarea>` : `<input data-legenda="${f.id}" value="${esc(f.legenda)}" placeholder="Legenda da foto ${i + 1}" aria-label="Legenda da foto ${i + 1}">`}
       ${naVisita ? `<button type="button" data-ia-leg="${f.id}">✨ Gerar legenda com IA</button>` : ''}
       <button type="button" data-remover="${f.id}">Remover</button>
@@ -524,6 +529,23 @@ async function mostrarFotos(v, obra) {
     <label class="add-foto">+ Adicionar fotos<br><small style="font-weight:400">câmera ou galeria</small>
       <input id="i-fotos" type="file" accept="image/*" multiple>
     </label>`;
+
+  // Reordenar: troca a foto com a vizinha e regrava a ordem de todas (é essa ordem que o PDF usa)
+  box.querySelectorAll('[data-mover]').forEach((b) => {
+    b.onclick = async () => {
+      const i = +b.dataset.mover, j = i + +b.dataset.dir;
+      if (j < 0 || j >= fotos.length) return;
+      if (_salvarPendente) await _salvarPendente();   // não perder legenda que acabou de ser digitada
+      const lista = (await porIndice('fotos', 'visitaId', v.id)).sort((a, b2) => a.ordem - b2.ordem);
+      [lista[i], lista[j]] = [lista[j], lista[i]];
+      for (const [k, f] of lista.entries()) {
+        if (f.ordem !== (k + 1) * 10) { f.ordem = (k + 1) * 10; f.atualizadoEm = agora(); await gravar('fotos', f); }
+      }
+      await mostrarFotos(v, obra);
+      const alvo = box.querySelector(`[data-mover="${j}"][data-dir="${b.dataset.dir}"]`) || box.querySelector(`[data-mover="${j}"]`);
+      if (alvo) alvo.closest('.foto').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    };
+  });
 
   $('#i-fotos').onchange = async (e) => {
     const arquivos = [...e.target.files]; e.target.value = '';
