@@ -350,3 +350,135 @@ async function lerNotaFiscal(blob) {
   try { r = JSON.parse(txt); } catch (e) { throw new Error('a resposta da IA veio num formato inesperado. Tente de novo.'); }
   return { r, usd };
 }
+
+// ---------------------------------------------------------------- relatório de visita: relato → campos; foto → legenda
+// Nada disso vai direto para o PDF: a IA só preenche os campos da tela, que você revisa e edita.
+const IA_MODELO_VISITA = 'claude-sonnet-5-5';
+const IA_MODELO_LEGENDA = 'claude-haiku-5-5';
+const PRECO_VISITA = { ent: 2, sai: 10, lido: 0.10, grav: 2.5 };
+const PRECO_LEGENDA = { ent: 0.10, sai: 0.50, lido: 0.01, grav: 0.125 };
+const custoCom = (uso, p) => ((uso.input_tokens || 0) * p.ent + (uso.output_tokens || 0) * p.sai
+  + (uso.cache_read_input_tokens || 0) * p.lido + (uso.cache_creation_input_tokens || 0) * p.grav) / 1e6;
+
+const EXEMPLO_VISITA = `Equipe presente:
+Eng. Vinicius Melin e Altair de Souza Melin (profissional)
+
+Atividades em execução:
+Na chuva de 23/11, o acompanhamento com o forro aberto indicou que a água chegava pelo interior da alvenaria, ao lado do ponto vedado, o que levou à inspeção interna do tubo.
+Corte do tubo de ventilação na face interna da parede, para inspeção do trecho embutido até a grelha externa.
+Remoção de entulho de obra (argamassa, torrões e sujeira) acumulado no interior do tubo e junto à grelha.
+Vedação do vão entre o tubo e o colarinho da grelha com adesivo epóxi bicomponente (Flexobond EPD), aplicado sobre PVC lixado e superfície limpa e seca.
+Religação do tubo com luva de PVC.
+Vedação do encontro do tubo com a face interna da parede com o mesmo adesivo epóxi, em substituição ao selante aplicado anteriormente.
+
+Ocorrências:
+Constatou-se que o tubo de ventilação não está conectado à grelha do Ventokit: ele termina antes, dentro da parede, deixando um vão entre o tubo e o colarinho da grelha.
+O trecho estava obstruído com entulho da obra original, o que represava a água da chuva que entra pela grelha. Sem escoar para fora, a água transbordava pelo vão para o interior da alvenaria, escorrendo até o forro e a marcenaria da sala.
+Trata-se de defeito oculto da instalação original, identificável apenas com a abertura do forro e a inspeção interna do tubo.
+
+Orientações registradas:
+1. Aguardar a cura do epóxi;
+2. Teste com chuva antes do fechamento do forro, deixando alçapão de inspeção;
+3. Na inspeção após a chuva, verificar o encontro do epóxi com o tubo de PVC.
+
+Observação:
+A correção interna é necessária independentemente de outras causas, pois com o tubo desconectado e obstruído a infiltração ocorre mesmo com a fachada íntegra. Caso, após o reparo e o teste com chuva, persista alguma umidade, tratar-se-á de ponto distinto, relacionado à fachada, a ser avaliado à parte.
+
+Legendas de fotos no estilo desejado:
+"Forro aberto, com o tubo do Ventokit no entreforro"
+"Entulho de obra retirado do interior do tubo"
+"Tubo religado com luva e vedação em epóxi"`;
+
+const INSTRUCOES_VISITA = `Você redige relatórios de acompanhamento de obra (visita técnica) da V&M Engenharia (engenharia civil, Curitiba/PR), do Eng. Vinicius Melin (CREA PR-184877/D). O relatório vai para o cliente.
+O Vinicius escreve ou dita um relato informal da visita (às vezes com erros de digitação do ditado) e você devolve os campos do relatório.
+
+Regras:
+- Português formal e técnico de engenharia, frases curtas. Em "atividades_em_execucao", uma atividade por linha (separadas por quebra de linha), sem marcadores.
+- Não invente nada que não esteja no relato: nem fatos, nem materiais, nem nomes, nem datas, nem medidas. Se faltar uma informação que o campo precisa, deixe o campo vazio ou escreva [confirmar] no ponto que falta.
+- Se for útil sugerir algo que não está no relato (por exemplo, um próximo passo técnico evidente), marque o trecho com [sugestão] no início, para o Vinicius decidir se mantém.
+- Descreva problemas de forma neutra, como etapas de diagnóstico. Nunca use expressões como "não deu certo", "não funcionou", "falhou" ou "erro"; prefira "o acompanhamento indicou que...", "constatou-se que...".
+- equipe_presente: só quem o relato diz que estava presente. Se o relato não disser, deixe vazio.
+- ocorrencias: constatações, causas encontradas, imprevistos. Vazio se não houver.
+- orientacoes_registradas: próximos passos numerados ("1. ...;", "2. ...;" e o último com ponto final), um por linha.
+- observacao: ressalvas técnicas importantes (ex.: solução paliativa, ponto a avaliar à parte). Vazio se não houver.
+- A visita anterior (se vier) é só contexto para entender a sequência da obra: não repita o que já foi registrado nela, a não ser que o relato fale de novo.
+- Nunca use "arquiteto", "RRT", "CAU" nem "BALDRA".
+
+Exemplo de relatório no estilo desejado (outra obra):
+
+${EXEMPLO_VISITA}
+
+ATENÇÃO: este é só um exemplo de estilo e formato. Nunca copie os fatos dele para outras visitas; use apenas o que estiver no relato.`;
+
+const ESQUEMA_VISITA = {
+  type: 'object',
+  properties: {
+    equipe_presente: { type: 'string' },
+    atividades_em_execucao: { type: 'string' },
+    ocorrencias: { type: 'string' },
+    orientacoes_registradas: { type: 'string' },
+    observacao: { type: 'string' }
+  },
+  required: ['equipe_presente', 'atividades_em_execucao', 'ocorrencias', 'orientacoes_registradas', 'observacao'],
+  additionalProperties: false
+};
+
+const textoResposta = (resp) => (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+
+// Relato → campos. dadosObra: { obra, cliente, local, os }; anterior: { data, campos } da visita anterior (ou null).
+async function preencherVisitaIA(relato, dadosObra, anterior) {
+  const cliente = await clienteIA();
+  const partes = [
+    `Dados da obra:\n${JSON.stringify(dadosObra, null, 1)}`,
+    anterior ? `Visita anterior da mesma obra (${anterior.data}), só como contexto:\n${JSON.stringify(anterior.campos, null, 1)}` : 'Não há visita anterior registrada nesta obra.',
+    `Relato do Vinicius sobre esta visita:\n${relato}`
+  ];
+  let resp;
+  try {
+    resp = await cliente.messages.create({
+      model: IA_MODELO_VISITA,
+      max_tokens: 8000,
+      system: [{ type: 'text', text: INSTRUCOES_VISITA, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: partes.join('\n\n') }],
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema: ESQUEMA_VISITA } }
+    });
+  } catch (e) { console.error(e); throw erroIA(e); }
+  const usd = custoCom(resp.usage || {}, PRECO_VISITA);
+  somarGasto(usd);
+  if (resp.stop_reason === 'refusal') throw new Error('a IA não quis redigir esse relato. Reescreva com outras palavras.');
+  if (resp.stop_reason === 'max_tokens') throw new Error('o relato ficou grande demais para uma vez só.');
+  let r;
+  try { r = JSON.parse(textoResposta(resp)); } catch (e) { throw new Error('a resposta da IA veio num formato inesperado. Tente de novo.'); }
+  return { r, usd };
+}
+
+// Foto → legenda curta (até 12 palavras). contexto = texto com o relato e os campos da visita.
+async function legendaFotoIA(blob, contexto) {
+  const cliente = await clienteIA();
+  const dataUrl = await reduzirImagem(blob, 1024);
+  let resp;
+  try {
+    resp = await cliente.messages.create({
+      model: IA_MODELO_LEGENDA,
+      max_tokens: 200,
+      system: `Você escreve legendas de fotos para relatórios de acompanhamento de obra da V&M Engenharia.
+Responda SÓ com a legenda: uma frase técnica curta, de até 12 palavras, em português, sem aspas, sem ponto final e sem "Foto".
+Estilo: "Forro aberto, com o tubo do Ventokit no entreforro"; "Entulho de obra retirado do interior do tubo"; "Tubo religado com luva e vedação em epóxi".
+Descreva o que aparece na foto, usando o contexto da visita para dar os nomes técnicos certos. Não invente o que não se vê nem está no contexto. Linguagem neutra: nada de "falha", "erro" ou "não deu certo".`,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrl.split(',')[1] } },
+          { type: 'text', text: `Contexto da visita:\n${contexto}\n\nEscreva a legenda desta foto.` }
+        ]
+      }]
+    });
+  } catch (e) { console.error(e); throw erroIA(e); }
+  const usd = custoCom(resp.usage || {}, PRECO_LEGENDA);
+  somarGasto(usd);
+  if (resp.stop_reason === 'refusal') throw new Error('a IA não conseguiu descrever essa foto.');
+  const leg = textoResposta(resp).trim().split('\n')[0]
+    .replace(/^["“'«]+|["”'»]+$/g, '').replace(/^Foto\s*\d*\s*[-–:]\s*/i, '').replace(/\.$/, '').trim();
+  if (!leg) throw new Error('a IA não devolveu legenda.');
+  return { legenda: leg, usd };
+}

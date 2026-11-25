@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 20;
+const VERSAO_APP = 21;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -405,6 +405,11 @@ async function telaVisita(main, id) {
     <a class="voltar" href="#/obra/${obra.id}">‹ ${esc(obra.nome)}</a>
     <h1>Visita · ${dataBR(v.data)}</h1>
     <form id="f-visita" class="card" autocomplete="off">
+      <label for="v-relato">Relato da visita <small style="font-weight:400">(só para você; não vai no PDF)</small></label>
+      <textarea id="v-relato" name="relato" style="min-height:140px" placeholder="Escreva ou dite (microfone do teclado) o que aconteceu, do seu jeito. Depois toque em Preencher com IA.">${esc(v.relato)}</textarea>
+      <div class="botoes" style="margin-top:.5rem"><button class="btn sec" id="b-ia-visita" type="button">✨ Preencher com IA</button></div>
+      <div id="ia-visita-res"></div>
+      <hr style="border:0;border-top:1px solid var(--borda, #24405e);margin:1rem 0 .4rem">
       <label for="v-data">Data da visita</label>
       <input id="v-data" name="data" type="date" value="${esc(v.data)}">
       <div class="duas">
@@ -417,10 +422,12 @@ async function telaVisita(main, id) {
       ${campo('atividades', 'Atividades em execução', 'O que está sendo feito hoje')}
       ${campo('ocorrencias', 'Ocorrências', 'Problemas, atrasos, falta de material, chuva...')}
       ${campo('orientacoes', 'Orientações registradas', 'Orientações técnicas passadas à equipe nesta visita')}
+      ${campo('observacao', 'Observação', 'Ressalvas técnicas (opcional; em branco não aparece no PDF)')}
       <p class="salvo" id="salvo"></p>
     </form>
 
     <h2>Fotos</h2>
+    <div id="acoes-fotos"></div>
     <div class="fotos" id="fotos"></div>
 
     <div class="botoes lado">
@@ -446,8 +453,49 @@ async function telaVisita(main, id) {
 
   await mostrarFotos(v, obra);
 
-  $('#b-enviar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'enviar', 'Relatório de Acompanhamento de Obra');
-  $('#b-baixar').onclick = (e) => acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'baixar', 'Relatório de Acompanhamento de Obra');
+  // IA: relato → campos (você revisa; nada vai ao PDF sem passar por esta tela)
+  const MARCA_REVISAR = /\[\s*(confirmar|sugest[aã]o)[^\]]*\]/i;   // [confirmar], [confirmar data], [sugestão] ...
+  const CAMPOS_IA = [['equipe', 'equipe_presente', 'Equipe presente'], ['atividades', 'atividades_em_execucao', 'Atividades em execução'],
+    ['ocorrencias', 'ocorrencias', 'Ocorrências'], ['orientacoes', 'orientacoes_registradas', 'Orientações registradas'], ['observacao', 'observacao', 'Observação']];
+  $('#b-ia-visita').onclick = async (e) => {
+    const b = e.currentTarget;
+    const relato = $('#v-relato').value.trim();
+    if (relato.length < 15) { aviso('Escreva ou dite o relato da visita primeiro', 3500); $('#v-relato').focus(); return; }
+    const cheios = CAMPOS_IA.filter(([c]) => $('#v-' + c).value.trim()).map(([, , t]) => t);
+    if (cheios.length && !confirm(`Estes campos já estão preenchidos:\n- ${cheios.join('\n- ')}\n\nA IA vai substituir o texto deles. Continuar?`)) return;
+    await salvarAgora();
+    const todas = (await porIndice('visitas', 'obraId', obra.id)).filter((x) => x.id !== v.id && (x.data || '') <= (v.data || '')).sort(porData);
+    const ant = todas[todas.length - 1];
+    const anterior = ant && CAMPOS_IA.some(([c]) => (ant[c] || '').trim())
+      ? { data: dataBR(ant.data), campos: Object.fromEntries(CAMPOS_IA.map(([c, k]) => [k, ant[c] || ''])) } : null;
+    const orc = obra.orcamentoId ? await pegar('orcamentos', obra.orcamentoId) : null;
+    const dadosObra = { obra: obra.nome, cliente: obra.cliente || '', local: obra.local || '', os: (orc && orc.numero) || '' };
+    b.disabled = true; b.textContent = 'A IA está redigindo...'; $('#ia-visita-res').innerHTML = '';
+    try {
+      const { r, usd } = await preencherVisitaIA(relato, dadosObra, anterior);
+      for (const [c, k] of CAMPOS_IA) $('#v-' + c).value = (r[k] || '').trim();
+      await salvarAgora();
+      const pend = CAMPOS_IA.filter(([c]) => MARCA_REVISAR.test($('#v-' + c).value)).map(([, , t]) => t);
+      $('#ia-visita-res').innerHTML = `<p class="sub" style="margin:.5rem 0 0"><b>✓ Campos preenchidos pela IA.</b> Revise e ajuste antes de gerar o PDF.
+        ${pend.length ? `<br>Tem <b>[confirmar]</b> ou <b>[sugestão]</b> em: ${esc(pend.join(', '))}. Complete ou apague essas marcas.` : ''}
+        <br>Custo: ${textoGasto(usd)}</p>`;
+      aviso('Campos preenchidos: revise', 3500);
+    } catch (er) {
+      aviso('Erro: ' + er.message, 7000);
+      $('#ia-visita-res').innerHTML = `<p class="sub" style="margin:.5rem 0 0">Não deu para preencher: ${esc(er.message)}</p>`;
+    }
+    b.disabled = false; b.textContent = '✨ Preencher com IA';
+  };
+
+  // Antes do PDF: avisa se ficou [confirmar] ou [sugestão] nos campos ou nas legendas
+  const conferirAntesDoPdf = () => {
+    const marca = MARCA_REVISAR;
+    const onde = CAMPOS_IA.filter(([c]) => marca.test($('#v-' + c).value)).map(([, , t]) => t);
+    document.querySelectorAll('[data-legenda]').forEach((inp, i) => { if (marca.test(inp.value)) onde.push(`legenda da foto ${i + 1}`); });
+    return !onde.length || confirm(`Ainda há [confirmar] ou [sugestão] em:\n- ${onde.join('\n- ')}\n\nEssas marcas iriam para o PDF do cliente. Gerar mesmo assim?`);
+  };
+  $('#b-enviar').onclick = (e) => { if (conferirAntesDoPdf()) acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'enviar', 'Relatório de Acompanhamento de Obra'); };
+  $('#b-baixar').onclick = (e) => { if (conferirAntesDoPdf()) acaoPdf(e.currentTarget, () => gerarPdf(v.id), 'baixar', 'Relatório de Acompanhamento de Obra'); };
 
   $('#b-excluir-visita').onclick = async () => {
     const fotos = await porIndice('fotos', 'visitaId', v.id);
@@ -463,11 +511,13 @@ async function mostrarFotos(v, obra) {
   limparUrls();
   const fotos = (await porIndice('fotos', 'visitaId', v.id)).sort((a, b) => a.ordem - b.ordem);
   const box = $('#fotos'); if (!box) return;
+  const naVisita = !!$('#v-relato');
   box.innerHTML = fotos.map((f, i) => {
     const url = URL.createObjectURL(f.blob); _urls.push(url);
     return `<div class="foto">
       <img src="${url}" alt="Foto ${i + 1}" loading="lazy">
-      <input data-legenda="${f.id}" value="${esc(f.legenda)}" placeholder="Legenda da foto ${i + 1}" aria-label="Legenda da foto ${i + 1}">
+      ${naVisita ? `<textarea class="legenda" rows="2" data-legenda="${f.id}" placeholder="Legenda da foto ${i + 1}" aria-label="Legenda da foto ${i + 1}">${esc(f.legenda)}</textarea>` : `<input data-legenda="${f.id}" value="${esc(f.legenda)}" placeholder="Legenda da foto ${i + 1}" aria-label="Legenda da foto ${i + 1}">`}
+      ${naVisita ? `<button type="button" data-ia-leg="${f.id}">✨ Gerar legenda com IA</button>` : ''}
       <button type="button" data-remover="${f.id}">Remover</button>
     </div>`;
   }).join('') + `
@@ -504,6 +554,49 @@ async function mostrarFotos(v, obra) {
       clearTimeout(timers[id]); timers[id] = setTimeout(salvar, 600); _salvarPendente = salvar;
     });
   });
+  // Legendas pela IA: a foto (reduzida a 1024 px) + o relato e os campos da visita
+  const contextoVisita = () => [['Relato', 'relato'], ['Atividades em execução', 'atividades'], ['Ocorrências', 'ocorrencias'], ['Orientações', 'orientacoes']]
+    .map(([t, c]) => { const el = $('#v-' + c); const s = el ? el.value.trim() : (v[c] || '').trim(); return s ? `${t}:\n${s}` : ''; })
+    .filter(Boolean).join('\n\n') || 'Sem texto na visita.';
+  const gerarLegenda = async (id) => {
+    const f = await pegar('fotos', id); if (!f) return 0;
+    const { legenda, usd } = await legendaFotoIA(f.blob, contextoVisita());
+    const inp = box.querySelector(`[data-legenda="${id}"]`); if (inp) inp.value = legenda;
+    f.legenda = legenda; f.atualizadoEm = agora(); await gravar('fotos', f);
+    return usd;
+  };
+  box.querySelectorAll('[data-ia-leg]').forEach((b) => {
+    b.onclick = async () => {
+      const inp = box.querySelector(`[data-legenda="${b.dataset.iaLeg}"]`);
+      if (inp.value.trim() && !confirm('Esta foto já tem legenda. Substituir pela da IA?')) return;
+      b.disabled = true; b.textContent = 'Gerando...';
+      try { const usd = await gerarLegenda(b.dataset.iaLeg); aviso(`Legenda gerada (${textoGasto(usd)}): revise`, 3500); }
+      catch (er) { aviso('Erro: ' + er.message, 7000); }
+      b.disabled = false; b.textContent = '✨ Gerar legenda com IA';
+    };
+  });
+  const acoes = $('#acoes-fotos');
+  if (acoes) {
+    acoes.innerHTML = fotos.length ? '<div class="botoes" style="margin:0 0 .8rem"><button class="btn sec" id="b-ia-legendas" type="button">✨ Gerar legendas de todas as fotos</button></div>' : '';
+    if (fotos.length) $('#b-ia-legendas').onclick = async (e) => {
+      const b = e.currentTarget;
+      const vazias = fotos.filter((f) => !box.querySelector(`[data-legenda="${f.id}"]`).value.trim());
+      let alvo = vazias;
+      if (vazias.length < fotos.length) {
+        const sub = confirm(`${fotos.length - vazias.length} foto(s) já têm legenda.\n\nOK = gerar para TODAS (substitui as que já existem)\nCancelar = só para as ${vazias.length} sem legenda`);
+        alvo = sub ? fotos : vazias;
+      }
+      if (!alvo.length) { aviso('Todas as fotos já têm legenda', 3000); return; }
+      b.disabled = true; let usd = 0, ok = 0;
+      for (const [i, f] of alvo.entries()) {
+        b.textContent = `Gerando legenda ${i + 1} de ${alvo.length}...`;
+        try { usd += await gerarLegenda(f.id); ok++; } catch (er) { aviso('Erro: ' + er.message, 7000); if (/chave|crédito|internet|permissão/i.test(er.message)) break; }
+      }
+      b.disabled = false; b.textContent = '✨ Gerar legendas de todas as fotos';
+      if (ok) aviso(`${ok} legenda(s) gerada(s) (${textoGasto(usd)}): revise`, 4000);
+    };
+  }
+
   box.querySelectorAll('[data-remover]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('Remover esta foto?')) return;
@@ -977,7 +1070,7 @@ async function criarPdf(tituloTopo, linhaTopo) {
       const grupo = fotos.slice(i, i + colunas).map((f, k) => {
         const h = Math.min(maxH, COL * f.altura / f.largura);
         doc.setFontSize(fs);
-        return { f, h, w: h * f.largura / f.altura, leg: doc.splitTextToSize(pdfTxt(`Foto ${inicio + i + k}${f.legenda ? ' - ' + f.legenda.trim() : ''}`), COL) };
+        return { f, h, w: h * f.largura / f.altura, leg: doc.splitTextToSize(`Foto ${inicio + i + k}${(f.legenda || '').trim() ? ' – ' + pdfTxt(f.legenda.trim()) : ''}`, COL) };
       });
       const alt = maxH + Math.max(...grupo.map((p) => p.leg.length)) * lh + (tres ? 5 : 7);
       P.cabe(alt);
@@ -1074,6 +1167,7 @@ async function gerarPdf(visitaId) {
   P.titulo('Atividades em execução'); P.paragrafo(v.atividades);
   P.titulo('Ocorrências'); P.paragrafo(v.ocorrencias);
   P.titulo('Orientações registradas'); P.paragrafo(v.orientacoes, 'Nenhuma orientação registrada nesta visita.');
+  if ((v.observacao || '').trim()) { P.titulo('Observação'); P.paragrafo(v.observacao); }
   if (fotos.length) {
     P.titulo(`Relatório fotográfico (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`);
     await P.fotos(fotos);
@@ -1110,6 +1204,7 @@ async function gerarRelatorioObra(obraId, de, ate) {
     algo = P.campo('Atividades em execução', v.atividades) || algo;
     algo = P.campo('Ocorrências', v.ocorrencias) || algo;
     algo = P.campo('Orientações registradas', v.orientacoes) || algo;
+    algo = P.campo('Observação', v.observacao) || algo;
     const fotos = fotosDe.get(v.id);
     if (!algo && !fotos.length) P.paragrafo('', 'Sem registros nesta visita.', 10);
     if (fotos.length) { P.y += 1; await P.fotos(fotos, { colunas: 3, maxH: 44, inicio: nFoto, reduzir: 1000 }); nFoto += fotos.length; }
