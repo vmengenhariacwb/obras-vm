@@ -3,7 +3,7 @@
 // Todos os dados ficam SOMENTE neste aparelho (IndexedDB). Nada é enviado para servidor.
 
 // Número da versão mostrado no rodapé. Ao publicar, subir junto com VERSAO no sw.js (obras-vm-v15 = 15).
-const VERSAO_APP = 22;
+const VERSAO_APP = 23;
 
 const EMPRESA = {
   nome: 'V&M Engenharia',
@@ -1011,8 +1011,9 @@ async function criarPdf(tituloTopo, linhaTopo) {
   };
   P.cabe = (h) => { if (P.y + h > P.FIM) { doc.addPage(); P.cabecalho(); return true; } return false; };
 
-  P.titulo = (t) => {
-    P.cabe(16);
+  // junto = altura (mm) do que vem logo depois e não pode ficar separado do título (ex.: 1ª linha de fotos)
+  P.titulo = (t, junto = 0) => {
+    P.cabe(Math.max(16, 8 + junto));
     doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.NAVY);
     doc.text(t.toUpperCase(), M, P.y);
     doc.setDrawColor(...COR.AZUL); doc.setLineWidth(0.6); doc.line(M, P.y + 1.8, M + 18, P.y + 1.8);
@@ -1169,7 +1170,7 @@ async function gerarPdf(visitaId) {
   P.titulo('Orientações registradas'); P.paragrafo(v.orientacoes, 'Nenhuma orientação registrada nesta visita.');
   if ((v.observacao || '').trim()) { P.titulo('Observação'); P.paragrafo(v.observacao); }
   if (fotos.length) {
-    P.titulo(`Relatório fotográfico (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`);
+    P.titulo(`Relatório fotográfico (${fotos.length} foto${fotos.length > 1 ? 's' : ''})`, 68 + 3 * 4.2 + 7);   // título + 1ª linha de fotos (foto + até 3 linhas de legenda)
     await P.fotos(fotos);
   }
   P.assinatura(v.data);

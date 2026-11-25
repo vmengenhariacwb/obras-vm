@@ -463,9 +463,16 @@ async function legendaFotoIA(blob, contexto) {
       max_tokens: 400,
       thinking: { type: 'disabled' },   // legenda é curta: sem raciocínio (mais rápido e não estoura o limite)
       system: `Você escreve legendas de fotos para relatórios de acompanhamento de obra da V&M Engenharia.
-Responda SÓ com a legenda: uma frase técnica curta, de até 12 palavras, em português, sem aspas, sem ponto final e sem "Foto".
-Estilo: "Forro aberto, com o tubo do Ventokit no entreforro"; "Entulho de obra retirado do interior do tubo"; "Tubo religado com luva e vedação em epóxi".
-Descreva o que aparece na foto, usando o contexto da visita para dar os nomes técnicos certos. Não invente o que não se vê nem está no contexto. Linguagem neutra: nada de "falha", "erro" ou "não deu certo".`,
+Responda SÓ com a legenda, sem aspas e sem a palavra "Foto".
+
+Regras:
+- Descreva apenas o que é visível na foto. Não afirme ações ou reparos (ex.: "reparado", "vedado", "corrigido", "religado") que não estejam claramente visíveis na imagem.
+- Use o relato e os campos da visita para identificar os elementos (ex.: marcenaria, forro, Ventokit), mas não invente detalhes.
+- Evite termos depreciativos como "sujo", "mal feito", "estragado", "falha" ou "erro"; use termos técnicos neutros (ex.: "com manchas", "com marcas de infiltração", "com desgaste").
+- Se não tiver certeza do que aparece na foto, escreva uma legenda genérica e marque [confirmar] no final.
+- Máximo de 12 palavras, português, frase nominal, sem ponto final.
+
+Exemplos de estilo: "Forro aberto, com o tubo do Ventokit no entreforro"; "Interior do tubo com entulho de obra acumulado"; "Marcenaria com marcas de infiltração junto ao forro".`,
       messages: [{
         role: 'user',
         content: [
